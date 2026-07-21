@@ -2,6 +2,7 @@
 
 每个版本号后跟该版本主要升级备注（打包时由 scripts/release.sh 自动追加）。
 
+- **v1.1.3**（2026-07-21）— 插件系统演进为「切面微内核」阶段1-3（等价重构·行为不变·真机验收通过）——内核唯一原语=在一小组具名切面上注册处理器并按预算/权限/熔断/fail-open分发（注册面 callable/ui/capability·管线面 route/curate/context/params/generate/stream/after·分发面 dispatch）；新增 AspectBus 内核（Aspects 切面常量+每切面预算 / AspectRegistry 启用插件→管线面投影 / routeUntilTakeOver·parallel·serialForEach 分发组合子），把 Gateway 固定流水线改为按管线面顺序 dispatch；工具系统收敛为内置 type:tool 运行时插件（CapabilityRuntime 接口 + Runtimes 注册表 + ToolRuntime，"加一种能力类型=加一个 runtime、内核不动"由此为真）；新增 curate 切面（按需给小模型露 callable，无处理器则 exposure=null 全露、逐字节等价 v1）+ generate 显式化（takeOver=替换默认 generate）；现有 manifest 字段/钩子名/桥接口/真机行为全不变，KV 前缀缓存字节稳定（真机 prompt_n 28→1）。设计见规范 §13，迁移与真机结果见 docs/切面微内核迁移进展.md
 - **v1.1.1**（2026-07-18）— 参数导演——新增 params 钩子与第六个内置插件 com.gguf.params：按任务自动选采样参数（写作高温/代码计算 0 温/聊天官方档+DRY 防复读），可选 LLM 判断与回答共用上文 KV（前缀扩展零缓存污染）；网关内置「判定保护」：受限解码请求自动中和惩罚采样（防枚举判定被 rp1.1 打偏）并跳过聊天档位
 - **v1.1.0**（2026-07-18）— GPU/dotprod 提速——CPU 多变体运行时自动选 dotprod/i8mm（prefill 5.5×、生成 1.4×，老机自动回退不崩）+ 打包可选 Vulkan GPU（修 Mali bufferDeviceAddress 空指针崩溃）+ 新增「最优引擎选择测评」按模型实测自动选最快引擎 + GPU 崩溃自动回退 CPU
 - **v1.0.9**（2026-07-15）— 修正 1.0.8 展开插件滚到顶端不准（滚过头、图标被顶出屏幕）——去掉重复叠加的滚动量 + 等设置卡片撑高后重滚，现精准把插件图标对齐到顶端

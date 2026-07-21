@@ -16,9 +16,9 @@ android {
         minSdk = 28
         targetSdk = 35
         // 版本规则：每次发正式包 versionName +0.0.1、versionCode +1，旧 APK 按版本号留档（见 docs/打包流程.md）
-        // versionNote: 插件消息能力三连——①消息角标：manifest messageActions + messageAction 钩子（chat:action，纯 UI 侧不破零插件快路径）；②消息卡片：插件 WebView 自绘正文（chat:card，工具返回 card 附到本轮回复同条混排 / gguf.card.post 独立卡片，data.text 内部文本降级），交互即卡片页 DOM 事件；③gguf.tts.* 系统语音桥；内置朗读插件 1.1.2（角标朗读 + tts.say 工具→语音气泡自动播放/长按展开文字）；panel.topbar 可配置；顶栏改两端对齐槽位网格（44dp 提前算位、与头像 18dp 视觉线对齐）；门户下拉热区改回上 1/4；能力提供者=补丁式插件依赖（provides:["tts"] 接管全机发声、调穿默认实现可变调，内置猫嗓/简单变声示范）；中间件生效范围用户三选一（middleware.configurable，仅对内/内外通用/仅对外）；定制音色插件三来源（端侧 sherpa-onnx VITS JNI 神经推理·aishell3 174 音色·常驻后 64ms，局域网 OpenAI 兼容 /v1/audio/speech 与 GPT-SoVITS /tts 克隆）；新桥 gguf.tts.synthesize/synthesizeLocal 与 gguf.net.fetchAudio（宿主代取绕 CORS）；新增 docs/插件开发指南.md 与 docs/交互设计技巧/
-        versionCode = 13
-        versionName = "1.1.2"
+        // versionNote: 插件系统演进为「切面微内核」阶段1-3（等价重构·行为不变·真机验收通过）——内核唯一原语=在一小组具名切面上注册处理器并按预算/权限/熔断/fail-open分发（注册面 callable/ui/capability·管线面 route/curate/context/params/generate/stream/after·分发面 dispatch）；新增 AspectBus 内核（Aspects 切面常量+每切面预算 / AspectRegistry 启用插件→管线面投影 / routeUntilTakeOver·parallel·serialForEach 分发组合子），把 Gateway 固定流水线改为按管线面顺序 dispatch；工具系统收敛为内置 type:tool 运行时插件（CapabilityRuntime 接口 + Runtimes 注册表 + ToolRuntime，"加一种能力类型=加一个 runtime、内核不动"由此为真）；新增 curate 切面（按需给小模型露 callable，无处理器则 exposure=null 全露、逐字节等价 v1）+ generate 显式化（takeOver=替换默认 generate）；现有 manifest 字段/钩子名/桥接口/真机行为全不变，KV 前缀缓存字节稳定（真机 prompt_n 28→1）。设计见规范 §13，迁移与真机结果见 docs/切面微内核迁移进展.md
+        versionCode = 14
+        versionName = "1.1.3"
 
         // The bundled llama-server binary is arm64 only. Virtually every phone
         // from the last ~8 years is arm64-v8a.
