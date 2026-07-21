@@ -255,7 +255,24 @@ class Gateway(
         val takeOver = AspectBus.routeUntilTakeOver(reg.route, Aspects.ROUTE_BUDGET_MS) { p, remain ->
             PluginRuntime.dispatch(p.id, "route", turn, remain)
         }
+        // generate 面（接管分支）：某插件接管本轮 = 用它的 handle 替换默认 generate（默认 generate = 转发 llama-server）。
         if (takeOver != null) return Plan(takeOver, null, reg.toolCallables, reg.afterReply, reg.continuation, isStream)
+
+        // ---- curate 面：本轮给模型露哪些 callable（§13.4）。串行、快判定、总预算 150ms（禁调 LLM，同 route）。
+        // 无 curate 处理器 → exposure=null=全露，逐字节等价 v1；有处理器则取各自 expose[] 的并集收窄本轮教学。 ----
+        val exposure: Set<String>? = if (reg.curate.isEmpty()) null else {
+            val exposed = LinkedHashSet<String>()
+            var anyOpinion = false
+            AspectBus.serialForEach(
+                reg.curate, Aspects.CURATE_BUDGET_MS,
+                invoke = { p, remain -> PluginRuntime.dispatch(p.id, "curate", turn, remain) },
+            ) { _, r ->
+                val arr = r.optJSONArray("expose") ?: return@serialForEach
+                anyOpinion = true // 表态即计入（哪怕空数组＝"本轮啥都别露"）
+                for (i in 0 until arr.length()) arr.optString(i).trim().ifEmpty { null }?.let { exposed += it }
+            }
+            if (anyOpinion) exposed else null // 没有一个处理器表态 → 视为全露
+        }
 
         // ---- context 面：并行，总预算 250ms；懒注入判定（尾部背景块）在 applyContext 里做 ----
         val results = AspectBus.parallel(reg.context, Aspects.CONTEXT_BUDGET_MS) { p, remain ->
@@ -263,9 +280,8 @@ class Gateway(
         }
         applyContext(msgList, results, anyCrossDay)
 
-        // ---- curate 面（v1 绑定：默认"全露"）+ context：systemClause + 工具协议教学，逐轮字节稳定 ----
-        // §13.4：curate 尚未拆出独立处理器，applySystemSuffix 无条件注入全部启用工具的教学条款＝"全露"默认。
-        applySystemSuffix(msgList, active, hasNativeTools)
+        // ---- context 面（教学部分）：systemClause + 各运行时插件按 curate 的 exposure 生成的 callable 教学，逐轮字节稳定 ----
+        applySystemSuffix(msgList, active, hasNativeTools, exposure)
         root.put("messages", toJsonArray(msgList))
 
         // ---- params 面：按任务自适应采样参数（§6.10）。必须在 context/systemClause 之后——
@@ -298,6 +314,7 @@ class Gateway(
                 }
             }
         }
+        // generate 面（默认分支）：forwardBody = 组装完的请求体，交默认 generate 处理器 = 转发内部 llama-server。
         return Plan(null, root.toString().toByteArray(Charsets.UTF_8), reg.toolCallables, reg.afterReply, reg.continuation, isStream)
     }
 
@@ -435,8 +452,11 @@ class Gateway(
         return WindowAssembly(dropped, anyCrossDay)
     }
 
-    /** systemClause + 各运行时插件的 callable 教学条款（curate/context 面），追加到首条 system 末尾（§6.5/§6.9/§13.5）。 */
-    private fun applySystemSuffix(msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean) {
+    /** systemClause + 各运行时插件的 callable 教学条款（curate/context 面），追加到首条 system 末尾（§6.5/§6.9/§13.5）。
+     *  [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）。 */
+    private fun applySystemSuffix(
+        msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean, exposure: Set<String>?,
+    ) {
         val sb = StringBuilder()
         for (p in active) {
             if (p.systemClause.isNotEmpty()) {
@@ -445,10 +465,10 @@ class Gateway(
             }
         }
         // 运行时插件的教学条款（今仅 type:tool 的 <tool> 协议）。客户端自带原生 tools 时整段不注入（§6.9 透传）。
-        // curate 的 v1 绑定＝"全露"：teachingClause 拿的是该 type 全部启用 callable，尚未按本轮意图收窄（§13.4）。
+        // exposure 由 curate 面算出；null（无 curate 处理器）= 全露，逐字节等价 v1。
         if (!hasNativeTools) {
             for (rt in Runtimes.all) {
-                val clause = rt.teachingClause(rt.callablesIn(active)) ?: continue
+                val clause = rt.teachingClause(rt.callablesIn(active), exposure) ?: continue
                 if (sb.isNotEmpty()) sb.append("\n\n")
                 sb.append(clause)
             }

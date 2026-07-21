@@ -70,6 +70,7 @@ class AspectRegistry(
     constrained: Boolean,
 ) {
     val route: List<PluginManifest> = active.filter { "route" in it.hooks }
+    val curate: List<PluginManifest> = active.filter { "curate" in it.hooks }
     val context: List<PluginManifest> = active.filter { "context" in it.hooks }
     val params: List<PluginManifest> = if (constrained) emptyList() else active.filter { "params" in it.hooks }
     val afterReply: List<PluginManifest> = active.filter { "afterReply" in it.hooks }

@@ -118,6 +118,7 @@ data class PluginManifest(
             for (h in hooks) {
                 val need = when (h) {
                     "route" -> "chat:route"
+                    "curate" -> "chat:context" // 本轮给模型露哪些 callable（§13.4；与 context 同属"影响模型所见"域）
                     "context" -> "chat:context"
                     "afterReply" -> "chat:annotate"
                     "continuation" -> "chat:annotate" // 流式回复后追加续段（两段式：回复→回忆中→续段）

@@ -19,8 +19,12 @@ interface CapabilityRuntime {
     /** 从一组启用插件里挑出属于本 type 的 callable。 */
     fun callablesIn(active: List<PluginManifest>): List<PluginManifest>
 
-    /** curate/context 面：教模型怎么触发本 type 的 callable，返回追加进首条 system 的教学条款；空则 null。 */
-    fun teachingClause(callables: List<PluginManifest>): String?
+    /**
+     * curate/context 面：教模型怎么触发本 type 的 callable，返回追加进首条 system 的教学条款；空则 null。
+     * [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）；
+     * 非 null = 只教 name ∈ exposure 的 callable（小模型上下文金贵，按本轮意图收窄）。
+     */
+    fun teachingClause(callables: List<PluginManifest>, exposure: Set<String>?): String?
 }
 
 /**
@@ -59,20 +63,21 @@ object ToolRuntime : CapabilityRuntime {
     override fun callablesIn(active: List<PluginManifest>): List<PluginManifest> =
         active.filter { it.tools.isNotEmpty() }
 
-    override fun teachingClause(callables: List<PluginManifest>): String? {
-        if (callables.isEmpty()) return null
-        val sb = StringBuilder()
-        sb.append("你可以在明确需要时于回复末尾追加下列标记来触发对应操作")
-            .append("（务必先用一段正常文字回应用户，标记只能跟在正文最后一行；没有明确需要时绝不要输出标记）：\n")
+    override fun teachingClause(callables: List<PluginManifest>, exposure: Set<String>?): String? {
+        // 先按 exposure 逐工具过滤生成条目行；exposure==null（无 curate 处理器）时全部保留＝等价 v1。
+        val lines = StringBuilder()
         for (p in callables) {
             for (t in p.tools) {
+                if (exposure != null && t.name !in exposure) continue
                 val sample = if (t.input == "json") "{...}" else "文本内容"
-                sb.append("- <tool name=\"").append(t.name).append("\">").append(sample).append("</tool>")
-                if (t.description.isNotEmpty()) sb.append("：").append(t.description)
-                sb.append("\n")
+                lines.append("- <tool name=\"").append(t.name).append("\">").append(sample).append("</tool>")
+                if (t.description.isNotEmpty()) lines.append("：").append(t.description)
+                lines.append("\n")
             }
         }
-        return sb.toString()
+        if (lines.isEmpty()) return null // 无 callable，或 curate 把本 type 全部收窄掉 → 不注入教学
+        return "你可以在明确需要时于回复末尾追加下列标记来触发对应操作" +
+            "（务必先用一段正常文字回应用户，标记只能跟在正文最后一行；没有明确需要时绝不要输出标记）：\n" + lines
     }
 
     /** stream 面：为本 type 的 callable 造流扫描器；无 callable 返回 null（relay 据此走"不扫描"快路径）。 */
