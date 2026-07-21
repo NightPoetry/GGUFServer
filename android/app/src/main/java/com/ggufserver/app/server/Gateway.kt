@@ -5,16 +5,16 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import com.ggufserver.app.ServerBus
 import com.ggufserver.app.data.MemoryIndex
+import com.ggufserver.app.plugin.AspectBus
+import com.ggufserver.app.plugin.AspectRegistry
+import com.ggufserver.app.plugin.Aspects
 import com.ggufserver.app.plugin.PluginManifest
 import com.ggufserver.app.plugin.PluginRuntime
 import com.ggufserver.app.plugin.PluginStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -242,51 +242,33 @@ class Gateway(
         root: JSONObject, msgList: MutableList<JSONObject>, active: List<PluginManifest>, turn: JSONObject,
         hasNativeTools: Boolean, anyCrossDay: Boolean, constrained: Boolean = false,
     ): Plan {
-        val routePlugins = active.filter { "route" in it.hooks }
-        val contextPlugins = active.filter { "context" in it.hooks }
-        val afterReplyPlugins = active.filter { "afterReply" in it.hooks }
-        val continuationPlugins = active.filter { "continuation" in it.hooks }
-        val toolPlugins = if (hasNativeTools) emptyList() else active.filter { it.tools.isNotEmpty() }
+        // 切面微内核（§13）：把启用插件投影成「每个管线面挂了谁」，再按管线面顺序经 AspectBus 分发。
+        // 阶段 1 等价重构——顺序/预算/fail-open 与旧内联流水线逐字节一致，仅收敛了编排。
+        val reg = AspectRegistry(active, hasNativeTools, constrained)
         val isStream = root.optBoolean("stream", false)
 
-        // ---- route：串行，总预算 150ms（红线：request 路径唯一的两个同步点之一） ----
-        var takeOver: PluginManifest? = null
-        if (routePlugins.isNotEmpty()) {
-            val deadline = System.currentTimeMillis() + ROUTE_BUDGET_MS
-            for (p in routePlugins) {
-                val remain = deadline - System.currentTimeMillis()
-                if (remain <= 0) break
-                val r = PluginRuntime.dispatch(p.id, "route", turn, remain)
-                if (r?.optBoolean("takeOver") == true) { takeOver = p; break }
-            }
+        // ---- route 面：串行、可接管，总预算 150ms（红线：request 路径同步点之一） ----
+        val takeOver = AspectBus.routeUntilTakeOver(reg.route, Aspects.ROUTE_BUDGET_MS) { p, remain ->
+            PluginRuntime.dispatch(p.id, "route", turn, remain)
         }
-        if (takeOver != null) return Plan(takeOver, null, toolPlugins, afterReplyPlugins, continuationPlugins, isStream)
+        if (takeOver != null) return Plan(takeOver, null, reg.toolCallables, reg.afterReply, reg.continuation, isStream)
 
-        // ---- context：并行，总预算 250ms；懒注入判定（尾部背景块）在 applyContext 里做 ----
-        val results = if (contextPlugins.isNotEmpty()) {
-            val deadline = System.currentTimeMillis() + CONTEXT_BUDGET_MS
-            coroutineScope {
-                contextPlugins.map { p ->
-                    async {
-                        val remain = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
-                        p to (if (remain <= 0) null else PluginRuntime.dispatch(p.id, "context", turn, remain))
-                    }
-                }.awaitAll()
-            }
-        } else emptyList()
+        // ---- context 面：并行，总预算 250ms；懒注入判定（尾部背景块）在 applyContext 里做 ----
+        val results = AspectBus.parallel(reg.context, Aspects.CONTEXT_BUDGET_MS) { p, remain ->
+            PluginRuntime.dispatch(p.id, "context", turn, remain)
+        }
         applyContext(msgList, results, anyCrossDay)
 
-        // ---- systemClause + 工具协议教学：只取决于当前启用集合，逐轮字节稳定 ----
+        // ---- curate 面（v1 绑定：默认"全露"）+ context：systemClause + 工具协议教学，逐轮字节稳定 ----
+        // §13.4：curate 尚未拆出独立处理器，applySystemSuffix 无条件注入全部启用工具的教学条款＝"全露"默认。
         applySystemSuffix(msgList, active, hasNativeTools)
         root.put("messages", toJsonArray(msgList))
 
-        // ---- params：按任务自适应采样参数（§6.10）。必须在 context/systemClause 之后——
+        // ---- params 面：按任务自适应采样参数（§6.10）。必须在 context/systemClause 之后——
         // 插件若走 LLM 判断（llm.classify），判断请求要以「最终组装完的 messages」为前缀才能与
         // 本次转发共用 KV（严格后缀扩展，判断后 llama-server 剪尾零残留）。串行分发，fail-open。
-        // 受限解码请求跳过：判定/抽取类请求的参数由调用方定型（判定保护已在管线入口中和惩罚），
-        // 聊天三档对它们不适用——绝不能让「聊天档 0.7」踩掉调用方特意设的判定温度。
-        val paramsPlugins = if (constrained) emptyList() else active.filter { "params" in it.hooks }
-        if (paramsPlugins.isNotEmpty()) {
+        // 受限解码请求跳过（reg.params 已排除）：判定/抽取类请求的参数由调用方定型，聊天三档不适用。
+        if (reg.params.isNotEmpty()) {
             // 客户端显式设置过的采样键快照：external 来源不可覆盖（尊重 API 调用者的显式意图）；
             // local 来源的 body 参数只是配置抽屉滑杆的通用缺省 → 插件按任务的判断可以覆盖。
             val clientKeys = SAMPLING_KEYS.filterTo(HashSet()) { root.has(it) }
@@ -294,12 +276,11 @@ class Gateway(
             val payload = JSONObject(turn.toString())
                 .put("messages", toJsonArray(msgList))
                 .put("clientParams", JSONArray(clientKeys.toList()))
-            val deadline = System.currentTimeMillis() + PARAMS_BUDGET_MS
-            for (p in paramsPlugins) {
-                val remain = deadline - System.currentTimeMillis()
-                if (remain <= 0) break
-                val r = PluginRuntime.dispatch(p.id, "params", payload, remain) ?: continue
-                val params = r.optJSONObject("params") ?: continue
+            AspectBus.serialForEach(
+                reg.params, Aspects.PARAMS_BUDGET_MS,
+                invoke = { p, remain -> PluginRuntime.dispatch(p.id, "params", payload, remain) },
+            ) { p, r ->
+                val params = r.optJSONObject("params") ?: return@serialForEach
                 val applied = ArrayList<String>()
                 for (k in SAMPLING_KEYS) {
                     if (!params.has(k)) continue
@@ -313,7 +294,7 @@ class Gateway(
                 }
             }
         }
-        return Plan(null, root.toString().toByteArray(Charsets.UTF_8), toolPlugins, afterReplyPlugins, continuationPlugins, isStream)
+        return Plan(null, root.toString().toByteArray(Charsets.UTF_8), reg.toolCallables, reg.afterReply, reg.continuation, isStream)
     }
 
     /**
@@ -491,7 +472,7 @@ class Gateway(
 
     /** 返回 false = handle 没给出可用结果（超时/异常/空回应），调用方应 fail-open 退回普通转发。 */
     private suspend fun handleTakeOver(client: Socket, plugin: PluginManifest, turn: JSONObject, root: JSONObject): Boolean {
-        val result = PluginRuntime.dispatch(plugin.id, "handle", turn, HANDLE_BUDGET_MS) ?: return false
+        val result = PluginRuntime.dispatch(plugin.id, "handle", turn, Aspects.HANDLE_BUDGET_MS) ?: return false
         val hasContent = result.has("content")
         val hasNotice = result.has("notice")
         if (!hasContent && !hasNotice) return false
@@ -589,7 +570,7 @@ class Gateway(
             val notices = JSONArray()
             for (p in afterReplyPlugins) {
                 val msg = JSONObject().put("id", respObj.optString("id")).put("content", content).put("reasoning", "")
-                val r = PluginRuntime.dispatch(p.id, "afterReply", msg, AFTER_REPLY_BUDGET_MS) ?: continue
+                val r = PluginRuntime.dispatch(p.id, "afterReply", msg, Aspects.AFTER_REPLY_BUDGET_MS) ?: continue
                 if (r.has("content")) content = r.optString("content")
                 if (r.has("notice")) r.optString("notice").ifBlank { null }?.let { notices.put(JSONObject().put("plugin", p.id).put("text", it)) }
             }
@@ -703,7 +684,7 @@ class Gateway(
             val cards = JSONArray()
             toolCall?.let { (plugin, name, input) ->
                 val payload = JSONObject().put("name", name).put("input", input).put("turn", turn)
-                val result = PluginRuntime.dispatch(plugin.id, "tool", payload, TOOL_BUDGET_MS)
+                val result = PluginRuntime.dispatch(plugin.id, "tool", payload, Aspects.TOOL_BUDGET_MS)
                 if (result != null && result.has("notice")) {
                     result.optString("notice").ifBlank { null }?.let { notices.put(JSONObject().put("plugin", plugin.id).put("text", it)) }
                 }
@@ -740,7 +721,7 @@ class Gateway(
                     emitNoticeChunk(clientOut, p.id, "正在回忆…")
                     // 扁平：turn 的字段（source/sessionId/text/messages）平铺，再加 content（第一段回复），与其它钩子入参一致。
                     val payload = JSONObject(turn.toString()).put("content", fullContent.toString())
-                    val r = runCatching { PluginRuntime.dispatch(p.id, "continuation", payload, CONTINUATION_BUDGET_MS) }.getOrNull()
+                    val r = runCatching { PluginRuntime.dispatch(p.id, "continuation", payload, Aspects.CONTINUATION_BUDGET_MS) }.getOrNull()
                     val cont = r?.optString("content")?.ifBlank { null }
                     if (cont != null) emitSyntheticContent(clientOut, cont)
                 }
@@ -755,7 +736,7 @@ class Gateway(
                 bgScope.launch {
                     for (p in afterReplyPlugins) {
                         val msg = JSONObject().put("id", "").put("content", content).put("reasoning", "")
-                        val r = PluginRuntime.dispatch(p.id, "afterReply", msg, AFTER_REPLY_BUDGET_MS) ?: continue
+                        val r = PluginRuntime.dispatch(p.id, "afterReply", msg, Aspects.AFTER_REPLY_BUDGET_MS) ?: continue
                         r.optString("notice").ifBlank { null }?.let { ServerBus.appendLog("[插件:${p.id}] $it") }
                     }
                 }
@@ -1006,24 +987,18 @@ class Gateway(
     }
 
     companion object {
-        private const val ROUTE_BUDGET_MS = 150L
-        private const val CONTEXT_BUDGET_MS = 250L
-        // params：JS 规则路径毫秒级返回；LLM 判断路径 = 前缀扩展分类（判断请求顺手预填了
-        // 本轮对话前缀，是回答本来要付的工作），冷缓存长对话可能吃满预算 → 给足并 fail-open。
-        private const val PARAMS_BUDGET_MS = 20_000L
+        // 每切面预算已上移到切面微内核 [Aspects]（§13.3 分发面自带属性，不再由 Gateway 各自持有）。
+        // 引用点：computePlan 用 Aspects.ROUTE/CONTEXT/PARAMS_BUDGET_MS；handleTakeOver/relay 用
+        // Aspects.HANDLE/TOOL/AFTER_REPLY/CONTINUATION_BUDGET_MS。
 
-        /** params 钩子可写的采样参数白名单（llama-server /v1/chat/completions 每请求字段）。 */
+        /** params 钩子可写的采样参数白名单（llama-server /v1/chat/completions 每请求字段）。
+         *  阶段 2 工具/参数系统内插件化后，随 type:params 运行时插件一并迁走；当前留在网关。 */
         private val SAMPLING_KEYS = listOf(
             "temperature", "top_p", "top_k", "min_p",
             "repeat_penalty", "presence_penalty", "frequency_penalty",
             "dry_multiplier", "dry_base", "dry_allowed_length", "dry_penalty_last_n",
             "top_n_sigma", "xtc_probability", "xtc_threshold",
         )
-        private const val HANDLE_BUDGET_MS = 120_000L
-        private const val TOOL_BUDGET_MS = 10_000L
-        private const val AFTER_REPLY_BUDGET_MS = 10_000L
-        // 续段：同轮召回(记忆模型) + 续段生成(前台模型)，都在手机上，给足预算；超时则 fail-open 直接收尾。
-        private const val CONTINUATION_BUDGET_MS = 90_000L
 
         private fun buildTagRegex(toolPlugins: List<PluginManifest>): Regex {
             val names = toolPlugins.flatMap { it.tools.map { t -> Regex.escape(t.name) } }
