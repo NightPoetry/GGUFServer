@@ -11,6 +11,10 @@ import com.ggufserver.app.plugin.Aspects
 import com.ggufserver.app.plugin.PluginManifest
 import com.ggufserver.app.plugin.PluginRuntime
 import com.ggufserver.app.plugin.PluginStore
+import com.ggufserver.app.plugin.Runtimes
+import com.ggufserver.app.plugin.ToolCall
+import com.ggufserver.app.plugin.ToolRuntime
+import com.ggufserver.app.plugin.ToolTagScanner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -431,7 +435,7 @@ class Gateway(
         return WindowAssembly(dropped, anyCrossDay)
     }
 
-    /** systemClause + 由 tools[] 自动生成的标签协议教学，追加到首条 system 消息末尾（§6.5/§6.9）。 */
+    /** systemClause + 各运行时插件的 callable 教学条款（curate/context 面），追加到首条 system 末尾（§6.5/§6.9/§13.5）。 */
     private fun applySystemSuffix(msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean) {
         val sb = StringBuilder()
         for (p in active) {
@@ -440,20 +444,13 @@ class Gateway(
                 sb.append(p.systemClause)
             }
         }
+        // 运行时插件的教学条款（今仅 type:tool 的 <tool> 协议）。客户端自带原生 tools 时整段不注入（§6.9 透传）。
+        // curate 的 v1 绑定＝"全露"：teachingClause 拿的是该 type 全部启用 callable，尚未按本轮意图收窄（§13.4）。
         if (!hasNativeTools) {
-            val toolPlugins = active.filter { it.tools.isNotEmpty() }
-            if (toolPlugins.isNotEmpty()) {
+            for (rt in Runtimes.all) {
+                val clause = rt.teachingClause(rt.callablesIn(active)) ?: continue
                 if (sb.isNotEmpty()) sb.append("\n\n")
-                sb.append("你可以在明确需要时于回复末尾追加下列标记来触发对应操作")
-                    .append("（务必先用一段正常文字回应用户，标记只能跟在正文最后一行；没有明确需要时绝不要输出标记）：\n")
-                for (p in toolPlugins) {
-                    for (t in p.tools) {
-                        val sample = if (t.input == "json") "{...}" else "文本内容"
-                        sb.append("- <tool name=\"").append(t.name).append("\">").append(sample).append("</tool>")
-                        if (t.description.isNotEmpty()) sb.append("：").append(t.description)
-                        sb.append("\n")
-                    }
-                }
+                sb.append(clause)
             }
         }
         if (sb.isEmpty()) return
@@ -630,9 +627,11 @@ class Gateway(
             writeRawHeaders(client, statusLine, downstreamHeaders)
 
             val fullContent = StringBuilder()
-            var toolCall: Triple<PluginManifest, String, String>? = null
+            var toolCall: ToolCall? = null
+            // stream 面：type:tool 运行时给出的令牌流扫描器（无工具 callable → null，走"不扫描"快路径）。
+            val scanner = ToolRuntime.makeScanner(toolPlugins)
 
-            if (toolPlugins.isEmpty()) {
+            if (scanner == null) {
                 // 没有插件工具需要扫描：只累计正文供 afterReply，其余字节原样转发（不解析）。
                 bodyStream.bufferedReader(Charsets.UTF_8).forEachLine { raw ->
                     emitRawLine(clientOut, raw)
@@ -642,8 +641,6 @@ class Gateway(
                     }
                 }
             } else {
-                val tagRe = buildTagRegex(toolPlugins)
-                val scanner = ToolTagScanner(tagRe)
                 bodyStream.bufferedReader(Charsets.UTF_8).forEachLine { raw ->
                     val line = raw.trim()
                     if (!line.startsWith("data:")) {
@@ -663,48 +660,29 @@ class Gateway(
                         is ToolTagScanner.Outcome.Resolved -> {
                             emitContentChunk(clientOut, obj, outcome.forwardText)
                             outcome.toolName?.let { name ->
-                                toolPlugins.firstOrNull { p -> p.tools.any { it.name == name } }
-                                    ?.let { toolCall = Triple(it, name, outcome.toolInput.orEmpty()) }
+                                ToolRuntime.ownerOf(toolPlugins, name)
+                                    ?.let { toolCall = ToolCall(it, name, outcome.toolInput.orEmpty()) }
                             }
                         }
                     }
                 }
                 val tail = scanner.finish()
                 if (tail.toolName != null) {
-                    toolPlugins.firstOrNull { p -> p.tools.any { it.name == tail.toolName } }
-                        ?.let { toolCall = Triple(it, tail.toolName, tail.toolInput.orEmpty()) }
+                    ToolRuntime.ownerOf(toolPlugins, tail.toolName)
+                        ?.let { toolCall = ToolCall(it, tail.toolName, tail.toolInput.orEmpty()) }
                 } else if (tail.leftoverText.isNotEmpty()) {
                     emitContentChunk(clientOut, JSONObject().put("choices", JSONArray().put(JSONObject().put("index", 0).put("delta", JSONObject()))), tail.leftoverText)
                 }
             }
 
-            // 流已结束：吞掉过工具标记才需要暂缓收尾（执行 hooks.tool ≤10s，把 notice 带在补发的
-            // 最后一个 chunk 上）；没有标记则 [DONE] 零延迟——这一段完全不触碰已经发出的正文字节。
-            val notices = JSONArray()
-            val cards = JSONArray()
-            toolCall?.let { (plugin, name, input) ->
-                val payload = JSONObject().put("name", name).put("input", input).put("turn", turn)
-                val result = PluginRuntime.dispatch(plugin.id, "tool", payload, Aspects.TOOL_BUDGET_MS)
-                if (result != null && result.has("notice")) {
-                    result.optString("notice").ifBlank { null }?.let { notices.put(JSONObject().put("plugin", plugin.id).put("text", it)) }
-                }
-                // 消息卡片（§6.12 工具路径）：工具返回 card = 在回复后面追加一条插件自绘的卡片消息。
-                // 要求 chat:card 权限；外部标准 OpenAI 客户端忽略 gguf 扩展字段，零影响。
-                if (result != null && "chat:card" in plugin.permissions) {
-                    result.optJSONObject("card")?.let { c ->
-                        cards.put(
-                            JSONObject()
-                                .put("plugin", plugin.id)
-                                .put("file", c.optString("file").ifBlank { "card.html" })
-                                .put("data", c.optJSONObject("data") ?: JSONObject())
-                        )
-                    }
-                }
-            }
-            if (notices.length() > 0 || cards.length() > 0) {
+            // after 面（工具执行）：吞掉过工具标记才需要暂缓收尾（执行 hooks.tool ≤10s，把 notice/card
+            // 带在补发的最后一个 chunk 上）；没有标记则 execute 返回空产物、[DONE] 零延迟——这一段
+            // 完全不触碰已经发出的正文字节。执行逻辑收敛在 type:tool 运行时（§13.5），网关只负责下发。
+            val toolOutcome = ToolRuntime.execute(toolCall, turn)
+            if (!toolOutcome.isEmpty()) {
                 val ggufExt = JSONObject()
-                if (notices.length() > 0) ggufExt.put("notices", notices)
-                if (cards.length() > 0) ggufExt.put("cards", cards)
+                if (toolOutcome.notices.length() > 0) ggufExt.put("notices", toolOutcome.notices)
+                if (toolOutcome.cards.length() > 0) ggufExt.put("cards", toolOutcome.cards)
                 val extraChunk = JSONObject()
                     .put("id", "chatcmpl-gguf-notice").put("object", "chat.completion.chunk")
                     .put("created", System.currentTimeMillis() / 1000)
@@ -999,96 +977,6 @@ class Gateway(
             "dry_multiplier", "dry_base", "dry_allowed_length", "dry_penalty_last_n",
             "top_n_sigma", "xtc_probability", "xtc_threshold",
         )
-
-        private fun buildTagRegex(toolPlugins: List<PluginManifest>): Regex {
-            val names = toolPlugins.flatMap { it.tools.map { t -> Regex.escape(t.name) } }
-            return Regex("<tool\\s+name=\"(${names.joinToString("|")})\"\\s*>([\\s\\S]*?)</tool>")
-        }
-    }
-}
-
-/**
- * 边转发边扫描 `<tool` 标记（规范 §6.9）：疑似标记起点开始暂扣（上限 4KB），
- * 确认为完整合法标记（标签名必须是 [toolNameRe] 里已声明的工具之一）→ 吞下不转发；
- * 证伪（超出暂扣上限仍未匹配）→ 原样放行。
- */
-private class ToolTagScanner(private val tagRe: Regex) {
-    private var suspect: StringBuilder? = null
-
-    sealed class Outcome {
-        data class Forward(val text: String) : Outcome()
-        object Hold : Outcome()
-        data class Resolved(val forwardText: String, val toolName: String?, val toolInput: String?) : Outcome()
-    }
-
-    fun feed(piece: String): Outcome {
-        val cur = suspect
-        if (cur == null) {
-            if (piece.isEmpty()) return Outcome.Forward(piece)
-            val idx = piece.indexOf(TAG_START)
-            if (idx < 0) {
-                val partial = partialPrefixLen(piece)
-                return if (partial == 0) {
-                    Outcome.Forward(piece)
-                } else {
-                    val headText = piece.substring(0, piece.length - partial)
-                    suspect = StringBuilder(piece.substring(piece.length - partial))
-                    if (headText.isEmpty()) Outcome.Hold else Outcome.Forward(headText)
-                }
-            }
-            val headText = piece.substring(0, idx)
-            suspect = StringBuilder(piece.substring(idx))
-            return tryResolve(headText)
-        }
-        cur.append(piece)
-        return tryResolve("")
-    }
-
-    private fun partialPrefixLen(piece: String): Int {
-        val maxLen = minOf(TAG_START.length - 1, piece.length)
-        for (len in maxLen downTo 1) {
-            if (TAG_START.startsWith(piece.substring(piece.length - len))) return len
-        }
-        return 0
-    }
-
-    private fun tryResolve(precedingForward: String): Outcome {
-        val cur = suspect!!
-        val m = tagRe.find(cur)
-        if (m != null) {
-            val toolName = m.groupValues[1]
-            val toolInput = m.groupValues[2]
-            val before = cur.substring(0, m.range.first)
-            val after = cur.substring((m.range.last + 1).coerceAtMost(cur.length))
-            suspect = null
-            return Outcome.Resolved(precedingForward + before + after, toolName, toolInput)
-        }
-        if (cur.length > CAP) {
-            val text = precedingForward + cur.toString()
-            suspect = null
-            return Outcome.Forward(text)
-        }
-        return if (precedingForward.isEmpty()) Outcome.Hold else Outcome.Forward(precedingForward)
-    }
-
-    data class Tail(val leftoverText: String, val toolName: String?, val toolInput: String?)
-
-    /** 流结束时调用，解决尾部还没确认的暂扣内容。 */
-    fun finish(): Tail {
-        val cur = suspect ?: return Tail("", null, null)
-        val m = tagRe.find(cur)
-        return if (m != null) {
-            val before = cur.substring(0, m.range.first)
-            val after = cur.substring((m.range.last + 1).coerceAtMost(cur.length))
-            Tail(before + after, m.groupValues[1], m.groupValues[2])
-        } else {
-            Tail(cur.toString(), null, null)
-        }
-    }
-
-    companion object {
-        private const val TAG_START = "<tool"
-        private const val CAP = 4096
     }
 }
 
