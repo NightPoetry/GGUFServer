@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App 图标背景：暖黑炭对角渐变（呼应 app 暖炭品牌色，深底最衬银机架 + 绿灯） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="#322E28"
+        android:centerColor="#221E18"
+        android:endColor="#16130F" />
+</shape>

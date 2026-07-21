@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参数导演设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; }
+  .val { font-weight: 600; color: var(--gg-accent, #C96442); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin-top: 6px; accent-color: var(--gg-accent, #C96442); }
+  .hint { font-size: 11px; color: var(--gg-muted, #6B6557); line-height: 1.5; margin-top: 6px; }
+  .saved { font-size: 11px; color: var(--gg-accent, #C96442); opacity: 0; transition: opacity .3s; }
+  .saved.on { opacity: 1; }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .knob {
+    position: absolute; inset: 0; border-radius: 11px; cursor: pointer;
+    background: var(--gg-line, #E7E3D8); transition: background .2s;
+  }
+  .knob:before {
+    content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%;
+    left: 2px; top: 2px; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  }
+  .switch input:checked + .knob { background: var(--gg-accent, #C96442); }
+  .switch input:checked + .knob:before { transform: translateX(18px); }
+</style>
+</head>
+<body>
+  <h3>生效范围</h3>
+  <div class="row">
+    <span>本机聊天（覆盖配置抽屉滑杆）</span>
+    <label class="switch"><input type="checkbox" id="swLocal"><span class="knob"></span></label>
+  </div>
+  <div class="row">
+    <span>外部客户端（仅补客户端没设的参数）</span>
+    <label class="switch"><input type="checkbox" id="swExternal"><span class="knob"></span></label>
+  </div>
+
+  <h3>任务判断</h3>
+  <div class="row">
+    <span>规则拿不准时用模型判断</span>
+    <label class="switch"><input type="checkbox" id="swLlm"><span class="knob"></span></label>
+  </div>
+  <div class="hint">判断与回答共用上文缓存（严格后缀扩展），额外耗时约等于预填几十 token；关闭则拿不准的一律走聊天档。</div>
+
+  <h3>聊天档温度（官方 no-think 推荐 0.7）</h3>
+  <div class="row"><span>写代码/计算固定走 0 温度精确档</span><span class="val" id="chatVal">0.7</span></div>
+  <input type="range" id="chatTemp" min="0.3" max="1.0" step="0.05" value="0.7">
+
+  <h3>创作档温度（官方 think 档 0.9）</h3>
+  <div class="row"><span>写诗/故事/文案时使用</span><span class="val" id="creativeVal">0.9</span></div>
+  <input type="range" id="creativeTemp" min="0.6" max="1.2" step="0.05" value="0.9">
+
+  <h3>DRY 防复读强度</h3>
+  <div class="row"><span>治模型逐字复读自己前几轮的回答</span><span class="val" id="dryVal">0.8</span></div>
+  <input type="range" id="dry" min="0" max="1.2" step="0.1" value="0.8">
+  <div class="hint">0 = 关闭。三档统一使用；判定类内部请求不经过本插件、永不受影响。<span class="saved" id="saved">已保存</span></div>
+
+<script>
+(function () {
+  'use strict';
+  var CFG = 'config';
+  var $ = function (id) { return document.getElementById(id); };
+  var saved = $('saved'), savedTimer = null;
+
+  function showSaved() {
+    saved.classList.add('on');
+    if (savedTimer) clearTimeout(savedTimer);
+    savedTimer = setTimeout(function () { saved.classList.remove('on'); }, 1200);
+  }
+
+  var defaults = { applyLocal: true, applyExternal: false, useLlm: false, chatTemp: 0.7, creativeTemp: 0.9, dry: 0.8 };
+
+  function render(c) {
+    $('swLocal').checked = c.applyLocal;
+    $('swExternal').checked = c.applyExternal;
+    $('swLlm').checked = c.useLlm;
+    $('chatTemp').value = c.chatTemp; $('chatVal').textContent = c.chatTemp.toFixed(2).replace(/0+$/, '').replace(/\.$/, '.0');
+    $('creativeTemp').value = c.creativeTemp; $('creativeVal').textContent = c.creativeTemp.toFixed(2).replace(/0+$/, '').replace(/\.$/, '.0');
+    $('dry').value = c.dry; $('dryVal').textContent = String(c.dry);
+  }
+
+  function loadCfg() {
+    gguf.storage.get(CFG).then(function (c) {
+      c = (c && typeof c === 'object') ? c : {};
+      var merged = {};
+      for (var k in defaults) merged[k] = (typeof c[k] === typeof defaults[k]) ? c[k] : defaults[k];
+      render(merged);
+    }).catch(function () { render(defaults); });
+  }
+
+  function save(patch) {
+    gguf.storage.get(CFG).then(function (c) {
+      c = (c && typeof c === 'object') ? c : {};
+      for (var k in patch) c[k] = patch[k];
+      return gguf.storage.set(CFG, c);
+    }).then(function () {
+      showSaved();
+      gguf.events.broadcast('config-updated', null);
+    }).catch(function () {});
+  }
+
+  $('swLocal').addEventListener('change', function () { save({ applyLocal: this.checked }); });
+  $('swExternal').addEventListener('change', function () { save({ applyExternal: this.checked }); });
+  $('swLlm').addEventListener('change', function () { save({ useLlm: this.checked }); });
+  $('chatTemp').addEventListener('input', function () { $('chatVal').textContent = this.value; });
+  $('chatTemp').addEventListener('change', function () { save({ chatTemp: parseFloat(this.value) }); });
+  $('creativeTemp').addEventListener('input', function () { $('creativeVal').textContent = this.value; });
+  $('creativeTemp').addEventListener('change', function () { save({ creativeTemp: parseFloat(this.value) }); });
+  $('dry').addEventListener('input', function () { $('dryVal').textContent = this.value; });
+  $('dry').addEventListener('change', function () { save({ dry: parseFloat(this.value) }); });
+
+  gguf.events.on('show', loadCfg);
+  loadCfg();
+})();
+</script>
+</body>
+</html>

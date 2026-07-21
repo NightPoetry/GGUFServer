@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>定制音色设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
+  body {
+    color: var(--gg-fg, #2D2A26);
+    font: 13px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 4px 2px 8px;
+  }
+  .row { margin: 8px 0; }
+  label { display: block; font-size: 11.5px; color: var(--gg-muted, #6B6557); margin-bottom: 3px; }
+  input[type=text], select {
+    width: 100%; padding: 7px 9px; font: inherit; font-size: 12.5px;
+    border: 1px solid var(--gg-line, #E7E3D8); border-radius: 8px;
+    background: var(--gg-card, #fff); color: var(--gg-fg, #2D2A26);
+  }
+  .half { display: flex; gap: 8px; }
+  .half > div { flex: 1; }
+  .muted { font-size: 11px; color: var(--gg-muted, #6B6557); margin-top: 3px; }
+  button {
+    margin-top: 6px; padding: 7px 14px; border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 8px; background: var(--gg-card, #fff); color: var(--gg-accent, #C96442);
+    font: inherit; font-size: 12.5px;
+  }
+  button:active { opacity: .6; }
+  #status { font-size: 11px; margin-top: 5px; color: var(--gg-muted, #6B6557); }
+</style>
+</head>
+<body>
+  <div class="row">
+    <label>发声来源</label>
+    <select id="mode">
+      <option value="local">内置神经推理（离线，多音色 VITS）</option>
+      <option value="openai">局域网·OpenAI 兼容（/v1/audio/speech：VoxCPM2·Kokoro·IndexTTS 部署）</option>
+      <option value="gptsovits">局域网·GPT-SoVITS（/tts：角色音色克隆）</option>
+    </select>
+  </div>
+
+  <div id="sec-local" style="display:none">
+    <div class="row">
+      <label>音色编号 sid（aishell3 模型 0~173，每个号一个音色）</label>
+      <input type="text" id="sid" placeholder="66" inputmode="numeric">
+    </div>
+    <div class="muted" id="localStatus">检查本地模型中…</div>
+  </div>
+
+  <div class="row" id="row-url">
+    <label>服务器地址（局域网）</label>
+    <input type="text" id="url" placeholder="http://192.168.3.100:8880">
+  </div>
+
+  <div id="sec-openai">
+    <div class="row half">
+      <div>
+        <label>voice（音色名）</label>
+        <input type="text" id="voice" placeholder="default / zf_xiaoxiao …">
+      </div>
+      <div>
+        <label>model</label>
+        <input type="text" id="model" placeholder="tts-1">
+      </div>
+    </div>
+  </div>
+
+  <div id="sec-gptsovits" style="display:none">
+    <div class="row">
+      <label>参考音频路径（服务器上的 ref_audio_path）</label>
+      <input type="text" id="refAudio" placeholder="refs/yuumi.wav">
+    </div>
+    <div class="row">
+      <label>参考音频的文字（prompt_text）</label>
+      <input type="text" id="promptText" placeholder="参考音频里说的那句话">
+    </div>
+  </div>
+
+  <button id="test">试听</button>
+  <div id="status"></div>
+  <div class="muted">发声失败会自动回退系统原声，不会无声。改完即存，立刻生效。</div>
+
+<script>
+(function () {
+  'use strict';
+  var fields = ['mode', 'url', 'voice', 'model', 'refAudio', 'promptText', 'sid'];
+  var els = {};
+  fields.forEach(function (k) { els[k] = document.getElementById(k); });
+
+  function showSections() {
+    var m = els.mode.value;
+    document.getElementById('sec-local').style.display = m === 'local' ? '' : 'none';
+    document.getElementById('row-url').style.display = m === 'local' ? 'none' : '';
+    document.getElementById('sec-openai').style.display = m === 'openai' ? '' : 'none';
+    document.getElementById('sec-gptsovits').style.display = m === 'gptsovits' ? '' : 'none';
+  }
+
+  function save() {
+    gguf.storage.set('cfg', {
+      mode: els.mode.value,
+      url: els.url.value.trim(),
+      voice: els.voice.value.trim(),
+      model: els.model.value.trim(),
+      refAudio: els.refAudio.value.trim(),
+      promptText: els.promptText.value.trim(),
+      sid: parseInt(els.sid.value, 10) || 0,
+    });
+  }
+
+  gguf.tts.localStatus().then(function (st) {
+    document.getElementById('localStatus').textContent = st && st.available
+      ? '本地模型就绪：' + (st.models || []).join('、')
+      : (st && st.binReady ? '推理引擎就绪，但还没有模型（放到 tts-models/ 目录）' : '本机推理引擎未内置（当前 App 版本不含）');
+  }).catch(function () {
+    document.getElementById('localStatus').textContent = '本地推理状态查询失败';
+  });
+
+  gguf.storage.get('cfg').then(function (cfg) {
+    if (cfg && typeof cfg === 'object') {
+      fields.forEach(function (k) { if (cfg[k] != null && els[k]) els[k].value = cfg[k]; });
+    }
+    showSections();
+  }).catch(showSections);
+
+  fields.forEach(function (k) {
+    els[k].addEventListener('change', function () { showSections(); save(); });
+  });
+
+  document.getElementById('test').addEventListener('click', function () {
+    save();
+    document.getElementById('status').textContent =
+      '已发送试听（网络推理可能要几秒）。听到系统原声 = 服务器没连上，看看地址与服务是否在跑。';
+    // 播放在 service 里做（它是发声提供者本人）；设置卡片与 service 经插件内广播互通
+    gguf.events.broadcast('voicelab-test', {});
+  });
+})();
+</script>
+</body>
+</html>

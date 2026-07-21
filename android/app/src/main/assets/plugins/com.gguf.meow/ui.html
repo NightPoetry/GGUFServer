@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>猫嗓</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .card { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 10px; background: var(--gg-card, #fff); padding: 10px 12px; }
+  .card p { margin: 4px 0; }
+  .muted { color: var(--gg-muted, #6B6557); font-size: 12px; }
+  button {
+    margin-top: 10px; padding: 7px 14px; border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 8px; background: var(--gg-card, #fff); color: var(--gg-accent, #C96442);
+    font: inherit; font-size: 12.5px;
+  }
+  button:active { opacity: .6; }
+</style>
+</head>
+<body>
+  <h3>这是什么</h3>
+  <div class="card">
+    <p>接管发声的变声示范插件：启用后，本机所有语音朗读（朗读角标、语音消息……）
+       都改走猫嗓——句尾带喵，音调拉高。</p>
+    <p class="muted">它是「能力提供者」的参考实现：接住发声调用、加工文本、再交回系统
+       语音引擎变调播出。禁用本插件即恢复原声，其它插件毫无感知。</p>
+    <button id="test">试听猫嗓</button>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  document.getElementById('test').addEventListener('click', function () {
+    // 面板与 service 同属提供者本人：直接演示"加工 + 调穿"的最终效果
+    gguf.tts.speak('你好呀，现在是猫嗓在说话喵～', { pitch: 1.45, rate: 1.05 });
+  });
+})();
+</script>
+</body>
+</html>

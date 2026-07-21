@@ -1,0 +1,377 @@
+/*
+ * 便签插件 service.js —— 原 ChatViewModel 便签逻辑的逐条移植（《工具插件规范》§11 参考实现）。
+ * 三条管线：清空（纯代码）、编辑（两阶段：自由思考 + json_schema 受限执行）、记录（json_schema
+ * 提取 + 正则兜底）。任何一步失败都不动便签（轮椅哲学：模型只管语义，关键动作代码保底）。
+ * 存储：gguf.storage 键 note:<sessionId>，值 { note, history:[{ts,note,label}] 上限 100 }。
+ */
+(function () {
+  'use strict';
+
+  // ============================== 意图正则（与原 ChatViewModel 逐字一致） ==============================
+
+  // 记录意图（原 noteIntentRe）：需要「帮我/给我/请/麻烦 + 记…」，或明确提到便签，或英文 note down / remember this
+  var noteIntentRe = new RegExp(
+    '^(?:please\\s+)?(?:(?:请|麻烦)?(?:帮我|给我)(?:记一下|记下来?|记录一下|记到便签里?|写到便签里?)|' +
+      '(?:记到|写到|加到)便签里?|' +
+      'note (?:this |it )?down(?: for me)?|remember this)[：:，,、。!！\\s]*([\\s\\S]*)$',
+    'i'
+  );
+  // 编辑意图（原 isNoteEditRequest）：必须显式提到「便签」+ 编辑动词，避免误伤普通对话
+  var editVerbRe = /改|更新|替换|换成|删|去掉|清空/;
+  // 清空意图（原 noteClear）：编辑意图之上再命中清空类说法
+  var clearRe = /清空|全部删除|删除全部|全都删|都删掉|所有.*删/;
+
+  function extractUserNoteRequest(msg) {
+    var m = noteIntentRe.exec(String(msg || '').trim());
+    if (!m) return null;
+    var body = (m[1] || '').trim();
+    return body ? body : null;
+  }
+
+  function isNoteEditRequest(msg) {
+    var s = String(msg || '');
+    return s.indexOf('便签') >= 0 && editVerbRe.test(s);
+  }
+
+  // ============================== BM25-lite（原 MemoryIndex 的 JS 版，序号定位兜底用） ==============================
+
+  function isCjk(code) { return code >= 0x4E00 && code <= 0x9FFF; }
+
+  function tokenize(text) {
+    var out = [];
+    var ascii = '';
+    var prevCjk = null;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      var code = text.charCodeAt(i);
+      if (code < 128 && /[a-zA-Z0-9]/.test(ch)) {
+        ascii += ch.toLowerCase();
+        prevCjk = null;
+      } else if (isCjk(code)) {
+        if (ascii) { out.push(ascii); ascii = ''; }
+        if (prevCjk !== null) out.push(prevCjk + ch);
+        prevCjk = ch;
+      } else {
+        if (ascii) { out.push(ascii); ascii = ''; }
+        prevCjk = null;
+      }
+    }
+    if (ascii) out.push(ascii);
+    return out;
+  }
+
+  /** 在 docs 中检索与 query 相关的条目，返回 [{index, score}]（分数>0，降序，最多 topK 条）。 */
+  function bm25Search(query, docs, topK) {
+    if (!docs.length || topK <= 0) return [];
+    var qTerms = [];
+    var seen = {};
+    tokenize(query).forEach(function (t) { if (!seen[t]) { seen[t] = true; qTerms.push(t); } });
+    if (!qTerms.length) return [];
+    var docTf = docs.map(function (d) {
+      var tf = {};
+      tokenize(d).forEach(function (t) { tf[t] = (tf[t] || 0) + 1; });
+      return tf;
+    });
+    var n = docs.length;
+    var total = 0;
+    docTf.forEach(function (tf) { for (var k in tf) total += tf[k]; });
+    var avgLen = Math.max(total, 1) / n;
+    var k1 = 1.2, b = 0.4;
+    var scored = [];
+    for (var i = 0; i < n; i++) {
+      var tf = docTf[i];
+      var len = 0;
+      for (var k2 in tf) len += tf[k2];
+      var s = 0;
+      for (var qi = 0; qi < qTerms.length; qi++) {
+        var t = qTerms[qi];
+        var f = tf[t];
+        if (!f) continue;
+        var df = 0;
+        for (var di = 0; di < n; di++) if (docTf[di][t]) df++;
+        var idf = Math.log(1 + (n - df + 0.5) / (df + 0.5));
+        s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * len / avgLen));
+      }
+      if (s > 0) scored.push({ index: i, score: s });
+    }
+    scored.sort(function (a, c) { return c.score - a.score; });
+    return scored.slice(0, topK);
+  }
+
+  // ============================== 存储（唯一写入口保快照语义） ==============================
+
+  function storageKey(sessionId) { return 'note:' + sessionId; }
+
+  function loadNoteState(sessionId) {
+    return gguf.storage.get(storageKey(sessionId)).then(function (v) {
+      if (!v || typeof v !== 'object') return { note: '', history: [] };
+      return { note: String(v.note || ''), history: Array.isArray(v.history) ? v.history : [] };
+    });
+  }
+
+  /**
+   * 便签唯一写入口（对应原 setNote）：内容真的变化才生效，并留一条历史快照（保存修改后的状态，
+   * 上限 100 条）。route/handle/tool/UI 所有写入都必须走这里。
+   */
+  function setNote(sessionId, newNote, label) {
+    var n = String(newNote || '').trim();
+    return loadNoteState(sessionId).then(function (st) {
+      if (n === st.note) return false;
+      var history = st.history.concat([{ ts: Date.now(), note: n, label: String(label || '') }]);
+      if (history.length > 100) history = history.slice(history.length - 100);
+      return gguf.storage.set(storageKey(sessionId), { note: n, history: history }).then(function () {
+        // 通知本插件的 UI 面板（若开着）刷新
+        gguf.events.broadcast('note-changed', { sessionId: sessionId });
+        return true;
+      });
+    });
+  }
+
+  function noteLines(note) {
+    return String(note || '').split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
+  }
+
+  /**
+   * 追加便签行（对应原 appendNoteLines，唯一的追加入口，边界规则集中在此）：
+   * 逐行去重——与现有行完全相同的不再追加。返回真正新增的行字符串，全是重复则返回 null。
+   */
+  function appendNoteLines(sessionId, text) {
+    return loadNoteState(sessionId).then(function (st) {
+      var existing = noteLines(st.note);
+      var added = [];
+      noteLines(text).forEach(function (line) {
+        if (existing.indexOf(line) < 0) {
+          existing.push(line);
+          added.push(line);
+        }
+      });
+      if (!added.length) return null;
+      return setNote(sessionId, existing.join('\n'), '记录：' + added[0].slice(0, 20)).then(function () {
+        return added.join('\n');
+      });
+    });
+  }
+
+  // ============================== route：快速意图判定（禁止调 LLM） ==============================
+
+  gguf.hooks.route(function (turn) {
+    if (!turn || !turn.sessionId) return {};
+    var text = String(turn.text || '');
+    if (isNoteEditRequest(text)) return { takeOver: true };       // 编辑/清空（清空是编辑的子集）
+    if (extractUserNoteRequest(text) !== null) return { takeOver: true }; // 记录
+    return {};
+  });
+
+  // ============================== handle：接管回合 ==============================
+
+  gguf.hooks.handle(function (turn, ctl) {
+    var text = String(turn.text || '');
+    var sessionId = turn.sessionId;
+    var edit = isNoteEditRequest(text);
+    var clear = edit && clearRe.test(text);
+
+    var p;
+    if (clear) {
+      // 清空：纯代码，不调模型
+      p = setNote(sessionId, '', '清空').then(function () {
+        ctl.finish({ notice: '已清空本会话便签（可在便签历史里恢复）' });
+      });
+    } else if (edit) {
+      p = loadNoteState(sessionId).then(function (st) {
+        if (!st.note) {
+          ctl.finish({ content: '便签目前是空的，没有可修改的内容。' });
+          return;
+        }
+        return runNoteOp(turn, ctl, st);
+      });
+    } else {
+      p = runNoteExtract(turn, ctl);
+    }
+    return p.catch(function () {
+      // 任何异常都不动便签，统一话术
+      ctl.finish({ content: '这条便签操作没执行成功，请换个说法再试一次。' });
+    });
+  });
+
+  /**
+   * 便签操作两阶段管线（原 runNoteOp 的逐条移植）：
+   * 阶段一「思考」：带最近对话，自由文本分析——要做什么操作、对哪条、新内容、依据；
+   * 阶段二「执行」：纯净上下文（只有便签清单 + 思考结论 + 原请求），json_schema
+   * 受限解码输出完整动作空间 {action: append/update/delete/clear/none, index, content}，
+   * 代码按动作精确执行。任何一步失败都不动便签。
+   */
+  function runNoteOp(turn, ctl, st) {
+    ctl.status('正在整理便签…');
+    var items = noteLines(st.note);
+    var numbered = items.map(function (s, i) { return (i + 1) + '. ' + s; }).join('\n');
+    var userText = String(turn.text || '');
+    var sessionId = turn.sessionId;
+
+    // 阶段一：思考（带最近 5 条截断对话帮助指代消解，每条截 200 字控制预填充）
+    var planMsgs = [{
+      role: 'system',
+      content:
+        '你是便签管家。当前便签共 ' + items.length + ' 条：\n' + numbered + '\n\n' +
+        '用户提出了一个便签操作请求。结合最近对话，在上面的清单里找出用户指的是哪一条' +
+        '（用户可能只说关键词，比如说『备份』指的就是包含备份的那条），然后给出结论：' +
+        '操作类型（追加/修改/删除/清空/无操作）+ 目标条目的序号和原文 + 新内容（如有）。' +
+        '直接下结论，不要反问。',
+    }];
+    (turn.messages || [])
+      .filter(function (m) { return m.role !== 'system' && String(m.content || '').trim(); })
+      .slice(-5)
+      .forEach(function (m) {
+        planMsgs.push({ role: m.role, content: String(m.content).slice(0, 200) });
+      });
+
+    return gguf.llm.chat({ messages: planMsgs, temperature: 0.2, max_tokens: 160 }).then(function (planRes) {
+      var plan = String((planRes && planRes.content) || '').trim();
+
+      // 阶段二：执行（纯净上下文 + 完整动作空间的受限解码）
+      var execSys =
+        '你是便签操作执行器。当前便签共 ' + items.length + ' 条：\n' + numbered + '\n\n' +
+        '对本次请求的分析结论：' + plan + '\n\n' +
+        '据此输出 JSON：action = append(追加)/update(修改)/delete(删除单条)/clear(清空全部)/none(不操作)，' +
+        'index = 目标条目序号（append/clear/none 时填 0），content = 新内容（delete/clear/none 时为空字符串）。';
+      return gguf.llm.chat({
+        messages: [
+          { role: 'system', content: execSys },
+          { role: 'user', content: userText },
+        ],
+        temperature: 0.2,
+        max_tokens: 200,
+        json_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['append', 'update', 'delete', 'clear', 'none'] },
+            index: { type: 'integer' },
+            content: { type: 'string' },
+          },
+          required: ['action', 'index', 'content'],
+        },
+      });
+    }).then(function (execRes) {
+      var args = null;
+      try { args = JSON.parse(String((execRes && execRes.content) || '')); } catch (e) { args = null; }
+      var action = args ? String(args.action || '') : '';
+      var index = args && typeof args.index === 'number' ? args.index : 0;
+      var content = args ? String(args.content || '').trim() : '';
+
+      var lines = items.slice();
+      // 序号无效时用 BM25 按用户原话的关键词定位（「删掉备份那条」→ 含“备份”的行）
+      function locate() {
+        var i = index - 1;
+        if (i >= 0 && i < lines.length) return i;
+        var hits = bm25Search(userText, lines, 1);
+        return hits.length ? hits[0].index : -1;
+      }
+
+      var failText = '这条便签操作没执行成功，请换个说法再试一次。';
+      if (action === 'append' && content) {
+        return appendNoteLines(sessionId, content).then(function (added) {
+          ctl.finish({ notice: added ? '已记入便签：' + added : '便签里已有这条，未重复添加' });
+        });
+      }
+      if (action === 'update') {
+        var iu = locate();
+        if (iu >= 0 && content) {
+          lines[iu] = content;
+          return setNote(sessionId, lines.join('\n'), '修改第' + (iu + 1) + '条').then(function () {
+            ctl.finish({ notice: '已更新便签第' + (iu + 1) + '条：' + content });
+          });
+        }
+        ctl.finish({ content: failText });
+        return;
+      }
+      if (action === 'delete') {
+        var idl = locate();
+        if (idl >= 0) {
+          var old = lines.splice(idl, 1)[0];
+          return setNote(sessionId, lines.join('\n'), '删除：' + old.slice(0, 20)).then(function () {
+            ctl.finish({ notice: '已从便签删除：' + old });
+          });
+        }
+        ctl.finish({ content: failText });
+        return;
+      }
+      if (action === 'clear') {
+        return setNote(sessionId, '', '清空').then(function () {
+          ctl.finish({ notice: '已清空本会话便签（可在便签历史里恢复）' });
+        });
+      }
+      if (action === 'none') {
+        ctl.finish({ content: '我理解这次不需要改动便签。要操作的话请说明是哪一条、改成什么。' });
+        return;
+      }
+      ctl.finish({ content: failText });
+    });
+  }
+
+  /**
+   * 记录意图管线（原 runNoteTool 的移植）：json_schema 受限解码提取要记的内容
+   * （从第一个 token 就硬约束输出合法 JSON，1B 也 100% 结构可靠），失败退回正则兜底
+   * （原 fallbackNoteFromUser 语义），两条路都没记上才道歉——托付绝不落空。
+   */
+  function runNoteExtract(turn, ctl) {
+    ctl.status('正在记录…');
+    var sessionId = turn.sessionId;
+    var msgs = [{
+      role: 'system',
+      content: '你是用户的备忘助手。把用户最新要求记录的内容提取出来，' +
+        '输出 JSON：content = 要记录的要点（简洁、完整、保留关键细节）。',
+    }];
+    (turn.messages || []).forEach(function (m) {
+      if (m.role !== 'system') msgs.push({ role: m.role, content: String(m.content || '') });
+    });
+
+    function finishWith(text) {
+      return appendNoteLines(sessionId, text).then(function (added) {
+        ctl.finish({ notice: added ? '已记入便签：' + added : '便签里已有这条，未重复添加' });
+      });
+    }
+    function fallback() {
+      var body = extractUserNoteRequest(turn.text);
+      if (body) return finishWith(body);
+      ctl.finish({ content: '抱歉，这条没记上，请再说一次要记的内容。' });
+    }
+
+    return gguf.llm.chat({
+      messages: msgs,
+      temperature: 0.2,
+      max_tokens: 256,
+      json_schema: { type: 'object', properties: { content: { type: 'string' } }, required: ['content'] },
+    }).then(function (res) {
+      var noted = null;
+      try { noted = String(JSON.parse(String((res && res.content) || '')).content || '').trim() || null; } catch (e) { noted = null; }
+      if (noted) return finishWith(noted);
+      return fallback();
+    }, function () {
+      return fallback();
+    });
+  }
+
+  // ============================== context：便签拼进首条 system（head，逐轮字节稳定） ==============================
+
+  gguf.hooks.context(function (turn) {
+    if (!turn || !turn.sessionId) return {};
+    return loadNoteState(turn.sessionId).then(function (st) {
+      var items = noteLines(st.note);
+      if (!items.length) return {};
+      // 与原 buildHistory 的拼法逐字一致；便签不变则逐轮字节稳定（KV 前缀缓存友好）
+      var head = '本会话便签（用户备忘，按条编号，直接利用即可，不要复述或提及它）：\n' +
+        items.map(function (s, i) { return (i + 1) + '. ' + s; }).join('\n');
+      return { head: head };
+    });
+  });
+
+  // ============================== tool：模型主动 <tool name="notes.append"> 标记（替代原 <note> 协议） ==============================
+
+  gguf.hooks.tool(function (name, input, turn) {
+    if (name !== 'notes.append' || !turn || !turn.sessionId) return {};
+    var text = String(input || '').trim();
+    if (!text) return {};
+    return appendNoteLines(turn.sessionId, text).then(function (added) {
+      return { notice: added ? '已记入便签：' + added : '便签里已有这条，未重复添加' };
+    });
+  });
+})();

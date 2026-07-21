@@ -1,0 +1,44 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="2.4"
+        android:scaleY="2.4"
+        android:translateX="24"
+        android:translateY="24">
+        <!-- 后台机架（最远）：往右上，最暗最淡，叠成小山坡 -->
+        <group android:translateX="2.0" android:translateY="-3.2">
+            <path
+                android:fillColor="#7B8691"
+                android:fillAlpha="0.30"
+                android:pathData="M20,13H4c-0.55,0 -1,0.45 -1,1v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1v-6C21,13.45 20.55,13 20,13zM20,3H4C3.45,3 3,3.45 3,4v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1V4C21,3.45 20.55,3 20,3z" />
+        </group>
+        <!-- 中台机架：往右上，中等明暗 -->
+        <group android:translateX="1.0" android:translateY="-1.6">
+            <path
+                android:fillColor="#8D98A3"
+                android:fillAlpha="0.52"
+                android:pathData="M20,13H4c-0.55,0 -1,0.45 -1,1v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1v-6C21,13.45 20.55,13 20,13zM20,3H4C3.45,3 3,3.45 3,4v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1V4C21,3.45 20.55,3 20,3z" />
+        </group>
+        <!-- 主机机架（最前）：银色金属渐变 -->
+        <path
+            android:pathData="M20,13H4c-0.55,0 -1,0.45 -1,1v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1v-6C21,13.45 20.55,13 20,13zM20,3H4C3.45,3 3,3.45 3,4v6c0,0.55 0.45,1 1,1h16c0.55,0 1,-0.45 1,-1V4C21,3.45 20.55,3 20,3z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="3" android:startY="2"
+                    android:endX="21" android:endY="22"
+                    android:startColor="#F1F4F7"
+                    android:centerColor="#CDD4DB"
+                    android:endColor="#9BA5AF" />
+            </aapt:attr>
+        </path>
+        <!-- 指示灯：绿色实心圆（主机左侧） -->
+        <path
+            android:fillColor="#3DDC84"
+            android:pathData="M7,19c-0.83,0 -1.5,-0.67 -1.5,-1.5S6.17,16 7,16s1.5,0.67 1.5,1.5S7.83,19 7,19zM7,9C6.17,9 5.5,8.33 5.5,7.5S6.17,6 7,6s1.5,0.67 1.5,1.5S7.83,9 7,9z" />
+    </group>
+</vector>

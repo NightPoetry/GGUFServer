@@ -1,0 +1,288 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>便签</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 自然文档流 + body 滚动：height:100% + flex 在面板 WebView 展开动画期间创建时
+     视口高度会固化在小值（记忆面板踩过的坑），不要用。 */
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 10px 12px;
+  }
+  .card {
+    background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 10px;
+    padding: 6px 10px;
+  }
+  .empty { color: var(--gg-muted, #6B6557); font-size: 12.5px; padding: 8px 2px; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 0.6px solid var(--gg-line, #E7E3D8); }
+  .row:last-child { border-bottom: none; }
+  .num { width: 26px; flex: none; color: var(--gg-muted, #6B6557); font-size: 12px; }
+  .row input[type=text] {
+    flex: 1; min-width: 0; border: none; outline: none; background: transparent;
+    color: var(--gg-fg, #2D2A26); font-size: 13.5px; padding: 2px 0;
+  }
+  .del {
+    flex: none; width: 22px; height: 22px; border: none; background: transparent;
+    color: var(--gg-muted, #6B6557); font-size: 14px; cursor: pointer; border-radius: 50%;
+  }
+  .addmark { width: 26px; flex: none; color: var(--gg-accent, #C96442); font-size: 13px; }
+  .addbtn {
+    flex: none; border: none; background: transparent; color: var(--gg-accent, #C96442);
+    font-size: 12.5px; cursor: pointer; padding: 2px 4px;
+  }
+  .bar { display: flex; align-items: center; padding-top: 6px; }
+  .hint { flex: 1; color: var(--gg-muted, #6B6557); font-size: 10.5px; }
+  .link {
+    border: none; background: transparent; color: var(--gg-accent, #C96442);
+    font-size: 11.5px; cursor: pointer; padding: 2px 4px; border-radius: 6px;
+  }
+  /* 历史面板 */
+  .hrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 0.6px solid var(--gg-line, #E7E3D8); }
+  .hrow:last-child { border-bottom: none; }
+  .hmain { flex: 1; min-width: 0; }
+  .hmeta { display: flex; gap: 8px; font-size: 11px; }
+  .hts { color: var(--gg-muted, #6B6557); }
+  .hlabel { color: var(--gg-accent, #C96442); }
+  .hprev { color: var(--gg-muted, #6B6557); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div id="listView">
+    <div class="card" id="noteCard">
+      <div class="empty" id="emptyHint">还没有条目。便签是这个会话专属的清单，每条一行，启用后会作为背景随提问交给模型。</div>
+      <div id="items"></div>
+      <div class="row" style="border-bottom:none">
+        <span class="addmark">＋</span>
+        <input type="text" id="newItem" placeholder="添加一条…">
+        <button class="addbtn hidden" id="addBtn">添加</button>
+      </div>
+    </div>
+    <div class="bar">
+      <span class="hint" id="statusHint">自动保存 · 内容归当前会话</span>
+      <button class="link" id="showHistory">历史</button>
+    </div>
+  </div>
+
+  <div id="historyView" class="hidden">
+    <div class="card" id="historyCard"></div>
+    <div class="bar">
+      <button class="link" id="backToNotes">返回便签</button>
+      <span class="hint" id="historyCount" style="text-align:right"></span>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var sessionId = null;
+  var items = [];          // 当前编辑中的条目
+  var savedNote = '';      // 最近一次已保存的便签全文
+  var history = [];
+  var saveTimer = null;
+  var editing = false;     // 有输入框聚焦时不被外部刷新覆盖
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function storageKey() { return 'note:' + sessionId; }
+
+  function loadState() {
+    if (sessionId === null) return Promise.resolve({ note: '', history: [] });
+    return gguf.storage.get(storageKey()).then(function (v) {
+      if (!v || typeof v !== 'object') return { note: '', history: [] };
+      return { note: String(v.note || ''), history: Array.isArray(v.history) ? v.history : [] };
+    });
+  }
+
+  /** 与 service.js 相同的唯一写入口语义：内容变化才写，留历史快照（上限 100）。 */
+  function setNote(newNote, label) {
+    var n = String(newNote || '').trim();
+    return loadState().then(function (st) {
+      if (n === st.note) { savedNote = st.note; history = st.history; return false; }
+      var h = st.history.concat([{ ts: Date.now(), note: n, label: label }]);
+      if (h.length > 100) h = h.slice(h.length - 100);
+      return gguf.storage.set(storageKey(), { note: n, history: h }).then(function () {
+        savedNote = n;
+        history = h;
+        gguf.events.broadcast('note-changed', { sessionId: sessionId });
+        return true;
+      });
+    });
+  }
+
+  function parseLines(s) {
+    return String(s || '').split('\n').map(function (x) { return x.trim(); }).filter(function (x) { return !!x; });
+  }
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      var joined = items.filter(function (x) { return x.trim(); }).join('\n');
+      if (joined !== savedNote) setNote(joined, '手动编辑');
+    }, 800);
+  }
+
+  // ---------------- 条目列表渲染 ----------------
+
+  function renderItems() {
+    var box = $('items');
+    box.innerHTML = '';
+    $('emptyHint').style.display = items.length ? 'none' : 'block';
+    items.forEach(function (text, i) {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = (i + 1) + '.';
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.value = text;
+      input.addEventListener('focus', function () { editing = true; });
+      input.addEventListener('blur', function () { editing = false; scheduleSave(); });
+      input.addEventListener('input', function () { items[i] = input.value; scheduleSave(); });
+      var del = document.createElement('button');
+      del.className = 'del';
+      del.textContent = '✕';
+      del.setAttribute('aria-label', '删除第' + (i + 1) + '条');
+      del.addEventListener('click', function () {
+        items.splice(i, 1);
+        renderItems();
+        scheduleSave();
+      });
+      row.appendChild(num); row.appendChild(input); row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+
+  function addNewItem() {
+    var input = $('newItem');
+    var t = input.value.trim();
+    if (!t) return;
+    items.push(t);
+    input.value = '';
+    $('addBtn').classList.add('hidden');
+    renderItems();
+    scheduleSave();
+  }
+
+  $('newItem').addEventListener('input', function () {
+    $('addBtn').classList.toggle('hidden', !this.value.trim());
+  });
+  $('newItem').addEventListener('keydown', function (e) { if (e.key === 'Enter') addNewItem(); });
+  $('newItem').addEventListener('focus', function () { editing = true; });
+  $('newItem').addEventListener('blur', function () { editing = false; });
+  $('addBtn').addEventListener('click', addNewItem);
+
+  // ---------------- 历史面板 ----------------
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    var mm = String(d.getMinutes());
+    if (mm.length < 2) mm = '0' + mm;
+    var hh = String(d.getHours());
+    if (hh.length < 2) hh = '0' + hh;
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hh + ':' + mm;
+  }
+
+  function renderHistory() {
+    var card = $('historyCard');
+    card.innerHTML = '';
+    if (!history.length) {
+      var e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = '还没有修改记录。';
+      card.appendChild(e);
+    }
+    history.slice().reverse().forEach(function (rev) {
+      var row = document.createElement('div');
+      row.className = 'hrow';
+      var main = document.createElement('div');
+      main.className = 'hmain';
+      var meta = document.createElement('div');
+      meta.className = 'hmeta';
+      var ts = document.createElement('span');
+      ts.className = 'hts';
+      ts.textContent = fmtTime(rev.ts);
+      var label = document.createElement('span');
+      label.className = 'hlabel';
+      label.textContent = rev.label || '';
+      meta.appendChild(ts); meta.appendChild(label);
+      var prev = document.createElement('div');
+      prev.className = 'hprev';
+      var lines = parseLines(rev.note);
+      prev.textContent = lines.length === 0 ? '（空）'
+        : (lines.length > 1 ? lines[0] + ' …共' + lines.length + '条' : lines[0]);
+      main.appendChild(meta); main.appendChild(prev);
+      var btn = document.createElement('button');
+      btn.className = 'link';
+      btn.textContent = '恢复';
+      btn.addEventListener('click', function () {
+        // 恢复本身也是一次历史，可再撤回
+        setNote(rev.note, '恢复历史版本').then(function () {
+          items = parseLines(savedNote);
+          renderItems();
+          showList();
+        });
+      });
+      row.appendChild(main); row.appendChild(btn);
+      card.appendChild(row);
+    });
+    $('historyCount').textContent = '最近 ' + history.length + ' 次修改';
+  }
+
+  function showList() {
+    $('historyView').classList.add('hidden');
+    $('listView').classList.remove('hidden');
+  }
+
+  $('showHistory').addEventListener('click', function () {
+    renderHistory();
+    $('listView').classList.add('hidden');
+    $('historyView').classList.remove('hidden');
+  });
+  $('backToNotes').addEventListener('click', showList);
+
+  // ---------------- 会话绑定与刷新 ----------------
+
+  function refresh() {
+    return gguf.chat.current().then(function (cur) {
+      if (!cur || cur.id === undefined || cur.id === null) {
+        sessionId = null;
+        items = [];
+        savedNote = '';
+        history = [];
+        $('statusHint').textContent = '还没有会话：先在聊天页发一条消息或新建对话。';
+        renderItems();
+        return;
+      }
+      sessionId = String(cur.id);
+      $('statusHint').textContent = '自动保存 · 内容归当前会话';
+      return loadState().then(function (st) {
+        savedNote = st.note;
+        history = st.history;
+        if (!editing) {
+          items = parseLines(st.note);
+          renderItems();
+        }
+      });
+    }).catch(function () { /* 桥暂不可用时静默，下次 show 再刷 */ });
+  }
+
+  gguf.events.on('show', refresh);
+  // service 侧写入（模型记录/修改）后主动刷新，避免面板显示旧内容
+  gguf.events.on('note-changed', function () { if (!editing) refresh(); });
+
+  refresh();
+})();
+</script>
+</body>
+</html>

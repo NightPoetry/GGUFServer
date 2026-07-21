@@ -1,0 +1,36 @@
+{
+  "id": "com.gguf.linemem",
+  "name": "线性记忆",
+  "version": "1.0.3",
+  "apiVersion": 1,
+  "description": "滚动摘要 + 长期记忆：模型闲置时把更早的对话归纳成前情摘要、抽取长期事实，让对话无限延续；请求路径只读缓存拼上下文，不拖慢回复",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "settingsCard": "settings.html",
+  "gesture": {
+    "edge": "top",
+    "range": [0.75, 1.0],
+    "threshold": 48
+  },
+  "panel": {
+    "size": 0.72
+  },
+  "permissions": [
+    "llm",
+    "chat:read",
+    "chat:context",
+    "chat:annotate"
+  ],
+  "hooks": [
+    "context",
+    "afterReply"
+  ],
+  "middleware": {
+    "scope": [
+      "local"
+    ]
+  }
+}

@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重型记忆设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body { min-height: 100%; background: var(--gg-bg, #FAF9F5); color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif; padding: 12px 14px 16px; }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-of-type { margin-top: 2px; }
+  .warn { background: rgba(180,67,43,.10); border: 1px solid rgba(180,67,43,.35); color: #B4432B;
+    border-radius: 8px; padding: 9px 11px; font-size: 12px; line-height: 1.5; }
+  .models { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 8px; overflow: hidden; }
+  .m { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-bottom: .6px solid var(--gg-line, #E7E3D8); cursor: pointer; }
+  .m:last-child { border-bottom: none; }
+  .m:active { background: var(--gg-line, #E7E3D8); }
+  .m.sel { background: rgba(201,100,66,.10); }
+  .dot { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--gg-line,#E7E3D8); flex: none; }
+  .m.sel .dot { border-color: var(--gg-accent,#C96442); background: var(--gg-accent,#C96442); box-shadow: inset 0 0 0 3px var(--gg-card,#fff); }
+  .m .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m .s { flex: none; color: var(--gg-muted, #6B6557); font-variant-numeric: tabular-nums; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; }
+  .val { font-weight: 600; color: var(--gg-accent, #C96442); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin-top: 6px; accent-color: var(--gg-accent, #C96442); }
+  .hint { font-size: 11px; color: var(--gg-muted, #6B6557); line-height: 1.5; margin-top: 5px; }
+  .empty { font-size: 12px; color: var(--gg-muted, #6B6557); padding: 8px 2px; }
+  .sw { width: 46px; height: 27px; border-radius: 999px; background: var(--gg-line,#E7E3D8); position: relative; flex: none; cursor: pointer; transition: background .2s; }
+  .sw.on { background: var(--gg-accent,#C96442); }
+  .sw .knob { position: absolute; top: 3px; left: 3px; width: 21px; height: 21px; border-radius: 50%; background: #fff; transition: left .2s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .sw.on .knob { left: 22px; }
+  .toast { font-size: 11px; color: var(--gg-accent, #C96442); opacity: 0; transition: opacity .3s; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="warn">⚠ 重型记忆会加载<b>第二个模型</b>做后台记忆检索，占用双份内存。仅在模型闲置时工作、不拖慢回复；但手机内存紧张时不建议开启。</div>
+
+  <h3>记忆模型（后台检索/链接用，建议选最小的 1B）<span class="toast" id="toast">已选</span></h3>
+  <div class="models" id="models"><div class="empty">读取中…</div></div>
+
+  <h3>存放区大小（同时驻留上下文的记忆条数）</h3>
+  <div class="row"><span>越大记得越多，但占更多上下文</span><span class="val" id="resVal">12</span></div>
+  <input type="range" id="res" min="4" max="24" step="2" value="12">
+
+  <h3>每次召回条数（提问时链接进来的相关记忆）</h3>
+  <div class="row"><span>逐条 L2 判定，越多越慢</span><span class="val" id="recVal">6</span></div>
+  <input type="range" id="rec" min="2" max="12" step="1" value="6">
+
+  <h3>同轮补充（两段式：回复 → 回忆中 → 续段）</h3>
+  <div class="row"><span>开：本轮就回忆并补一句（回复后稍等）<br>关：只注入下一轮（前台零等待）</span>
+    <span class="sw" id="sw" role="switch"><span class="knob"></span></span></div>
+
+  <div class="hint">记忆条目抽取、发散建边、碎片整理都在模型闲置时用记忆模型完成。两段式开启时：前台先流出第一段回复（不延迟），随后「回忆中」，再由前台模型根据召回的记忆补一句。</div>
+
+<script>
+(function () {
+  'use strict';
+  var CFG = 'config';
+  var cfg = { memModel: '', memModelName: '', residentMax: 12, recallN: 6, sameTurn: true };
+  var res = document.getElementById('res'), resVal = document.getElementById('resVal');
+  var rec = document.getElementById('rec'), recVal = document.getElementById('recVal');
+  var sw = document.getElementById('sw');
+  var toast = document.getElementById('toast'), toastTimer = null;
+
+  function showToast() { toast.classList.add('on'); if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(function () { toast.classList.remove('on'); }, 1200); }
+  function save() { return gguf.storage.set(CFG, cfg).then(function () { gguf.events.broadcast('config-changed', null); }); }
+  function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+  function human(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB'; }
+
+  function loadCfg() {
+    return gguf.storage.get(CFG).then(function (c) {
+      if (c && typeof c === 'object') cfg = { memModel: c.memModel || '', memModelName: c.memModelName || '', residentMax: c.residentMax || 12, recallN: c.recallN || 6, sameTurn: c.sameTurn !== false };
+      res.value = cfg.residentMax; resVal.textContent = cfg.residentMax;
+      rec.value = cfg.recallN; recVal.textContent = cfg.recallN;
+      sw.classList.toggle('on', !!cfg.sameTurn);
+    }).catch(function () {});
+  }
+
+  function renderModels() {
+    var box = document.getElementById('models');
+    gguf.host.models().then(function (list) {
+      if (!list || !list.length) { box.innerHTML = '<div class="empty">未找到 GGUF 模型，请先在设置里导入。</div>'; return; }
+      box.innerHTML = list.map(function (m) {
+        var sel = (m.path === cfg.memModel) ? ' sel' : '';
+        return '<div class="m' + sel + '" data-path="' + esc(m.path) + '" data-name="' + esc(m.name) + '">' +
+          '<span class="dot"></span><span class="n">' + esc(m.name) + '</span><span class="s">' + esc(human(m.sizeMB || 0)) + '</span></div>';
+      }).join('');
+      Array.prototype.forEach.call(box.querySelectorAll('.m'), function (el) {
+        el.addEventListener('click', function () {
+          cfg.memModel = el.getAttribute('data-path'); cfg.memModelName = el.getAttribute('data-name');
+          Array.prototype.forEach.call(box.querySelectorAll('.m'), function (e2) { e2.classList.remove('sel'); });
+          el.classList.add('sel');
+          save().then(showToast);
+        });
+      });
+    }).catch(function () { box.innerHTML = '<div class="empty">读取模型列表失败。</div>'; });
+  }
+
+  res.addEventListener('input', function () { resVal.textContent = res.value; });
+  res.addEventListener('change', function () { cfg.residentMax = parseInt(res.value, 10); save(); });
+  rec.addEventListener('input', function () { recVal.textContent = rec.value; });
+  rec.addEventListener('change', function () { cfg.recallN = parseInt(rec.value, 10); save(); });
+  sw.addEventListener('click', function () { cfg.sameTurn = !cfg.sameTurn; sw.classList.toggle('on', cfg.sameTurn); save(); });
+
+  gguf.events.on('show', function () { loadCfg().then(renderModels); });
+  loadCfg().then(renderModels);
+})();
+</script>
+</body>
+</html>
