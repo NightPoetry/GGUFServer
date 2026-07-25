@@ -162,6 +162,23 @@
     return {};
   });
 
+  // ============================== curate：本轮要不要把 notes.append 露给模型（§13.4，快判定禁 LLM） ==============================
+
+  // 显式的「帮我记一下」已被上面的 route 接管（根本走不到 curate）；这里管的是**隐含**场景：
+  // 用户随口提到一件带时间/承诺性质的事，模型可以自己决定要不要在回复末尾补 <tool name="notes.append">。
+  // 与本轮无关的闲聊一律不露——省下的是 1B 极其金贵的 system 预算（这条教学条款约 60 token），
+  // 也少一个让小模型"手痒乱调"的诱因。漏判无伤：用户显式说「帮我记一下」永远走 route 确定性接管。
+  var noteWorthRe = /便签|备忘|待办|记(?:一下|下来|录|住)|别忘|忘不了|提醒我?|todo|remember this|note down/i;
+  var timeHintRe = /今天|明天|后天|大后天|下周|下星期|下个?月|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}\s*[月日号]|\d{1,2}\s*[:：]\s*\d{2}|早上|上午|中午|下午|晚上|凌晨/;
+  var commitHintRe = /要去|得去|需要|计划|安排|约(?:了|好|在)|预约|截止|deadline|开会|体检|还款|生日|出差|面试|考试|报名|缴费|交(?:房租|水电|作业|材料)/;
+
+  gguf.hooks.curate(function (turn) {
+    if (!turn || !turn.sessionId) return { expose: [] };   // 无会话（外部请求）：便签无从依附，露了也没用
+    var text = String(turn.text || '');
+    var worth = noteWorthRe.test(text) || (timeHintRe.test(text) && commitHintRe.test(text));
+    return { expose: worth ? ['notes.append'] : [] };
+  });
+
   // ============================== handle：接管回合 ==============================
 
   gguf.hooks.handle(function (turn, ctl) {

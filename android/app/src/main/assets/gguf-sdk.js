@@ -52,7 +52,7 @@
     if (fn) { try { fn(piece); } catch (e) { /* 插件自己的回调出错不影响流继续 */ } }
   };
 
-  // ---- 钩子注册表：route/handle/context/afterReply/tool ----
+  // ---- 钩子注册表：route/curate/handle/context/params/afterReply/continuation/tool/messageAction/tts ----
   var hookHandlers = {};
   function register(name) {
     return function (fn) { hookHandlers[name] = fn; };
@@ -125,6 +125,10 @@
     },
     hooks: {
       route: register('route'),
+      // 本轮给模型露哪些 callable（§13.4）：入参 turn，返回 { expose: ["工具名", …] }。
+      // 请求路径同步点、总预算 150ms —— 必须是正则/关键词级快判定，禁止在这里调 LLM。
+      // 不返回 expose（或没有任何插件登记 curate）= 保持默认「全露」。
+      curate: register('curate'),
       handle: register('handle'),
       context: register('context'),
       afterReply: register('afterReply'),

@@ -48,6 +48,15 @@
     return {};
   });
 
+  // curate（§13.4，快判定禁 LLM）：只有用户像在要求「读出来/念一下/用语音说」时，才把 tts.say
+  // 露给模型。平时聊天不露——语音是用户主动要的交互，模型不该自己起意发语音，少一条教学条款
+  // 也是给 1B 的 system 省预算。角标朗读（messageAction）不受影响：那是用户点的，与暴露集无关。
+  var speakRe = /朗读|读一?[下遍]|念一?[下遍]|读给我|念给我|读出来|念出来|说出来|说给我听|用语音|语音(?:说|读|回复|播报)|播报|read (?:it |this )?aloud|speak (?:it|this)|say (?:it|this) out/i;
+
+  gguf.hooks.curate(function (turn) {
+    return { expose: speakRe.test(String((turn && turn.text) || '')) ? ['tts.say'] : [] };
+  });
+
   // 模型主动发语音：工具标签体 = 要说的话。返回 card → 宿主插入语音消息卡片（card.html 渲染）。
   // data.text 同时是卡片的「内部文本」：进上下文、可复制、长按展开、插件禁用时降级为普通文字。
   gguf.hooks.tool(async function (name, input) {

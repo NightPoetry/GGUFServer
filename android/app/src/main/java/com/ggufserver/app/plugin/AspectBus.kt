@@ -71,6 +71,9 @@ class AspectRegistry(
 ) {
     val route: List<PluginManifest> = active.filter { "route" in it.hooks }
     val curate: List<PluginManifest> = active.filter { "curate" in it.hooks }
+
+    /** curate 面的**弃权者**：没登记 curate 处理器的插件。它们的 callable 享有豁免（§13.4），见 [AspectBus.curateExposure]。 */
+    val curateAbstained: List<PluginManifest> = active.filter { "curate" !in it.hooks }
     val context: List<PluginManifest> = active.filter { "context" in it.hooks }
     val params: List<PluginManifest> = if (constrained) emptyList() else active.filter { "params" in it.hooks }
     val afterReply: List<PluginManifest> = active.filter { "afterReply" in it.hooks }
@@ -89,6 +92,29 @@ class AspectRegistry(
  */
 object AspectBus {
     /**
+     * fail-open 的**内核侧**兜底（§13.3）：任何一次处理器调用抛出的异常都降级成「该处理器本轮无返回」，
+     * 绝不阻断管线。`PluginRuntime.dispatch` 自身已 catch 并记熔断，这里再兜一层是因为
+     * fail-open 是**分发面自带属性**、不该依赖某个 invoke 实现的自觉——换平台（桌面端进程内 JS /
+     * 子进程）时新的 dispatch 实现照样受这条纪律保护，编排层的意外（如 payload 构造抛错）也不会
+     * 把一次普通聊天变成 500。
+     *
+     * 协程取消（[CancellationException]）必须原样上抛：那是「调用方不要这个结果了」，不是插件故障，
+     * 吞掉会让结构化并发失效（parallel 的兄弟协程/整轮请求取消不掉）。
+     */
+    private suspend fun guard(
+        p: PluginManifest,
+        remain: Long,
+        invoke: suspend (PluginManifest, Long) -> JSONObject?,
+    ): JSONObject? = try {
+        invoke(p, remain)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        android.util.Log.w("GGUF-gw", "aspect dispatch ${p.id} 异常，按无返回继续：${e.message}")
+        null
+    }
+
+    /**
      * route 语义：串行分发，共享 [budgetMs] deadline，第一个返回 `takeOver:true` 的处理器接管本轮
      * （后续不再询问）。返回接管者，或 null（无人接管 / 无处理器 / 预算耗尽）。
      */
@@ -102,7 +128,7 @@ object AspectBus {
         for (p in handlers) {
             val remain = deadline - System.currentTimeMillis()
             if (remain <= 0) break
-            val r = invoke(p, remain)
+            val r = guard(p, remain, invoke)
             if (r?.optBoolean("takeOver") == true) return p
         }
         return null
@@ -123,10 +149,42 @@ object AspectBus {
             handlers.map { p ->
                 async {
                     val remain = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
-                    p to (if (remain <= 0) null else invoke(p, remain))
+                    p to (if (remain <= 0) null else guard(p, remain, invoke))
                 }
             }.awaitAll()
         }
+    }
+
+    /**
+     * curate 语义（§13.4）：串行快判定，各处理器 `expose[]` 取**并集**算出本轮暴露集。
+     *
+     * 三条内核纪律：
+     * 1. **无人登记 → null = 全露**（默认等价 v1，curate 只是收窄能力，不改默认）。
+     * 2. **表态即计入**：返回了 `expose` 字段就算表态，哪怕是空数组（= 本轮我这边啥都别露）。
+     *    一个处理器都没表态（全超时/全异常/都没给 expose）→ 仍是 null = 全露（fail-open）。
+     * 3. **弃权豁免**：[abstained]（没登记 curate 的插件）的 callable 无条件并入暴露集。
+     *    收窄是「我对我的能力表态」，不是「替沉默的人做决定」——否则装一个带 curate 的插件
+     *    会静默掐掉别家插件的工具，这与 fail-open 同源：不参与决策者不该被决策伤害。
+     */
+    suspend fun curateExposure(
+        handlers: List<PluginManifest>,
+        abstained: List<PluginManifest>,
+        budgetMs: Long,
+        invoke: suspend (PluginManifest, Long) -> JSONObject?,
+    ): Set<String>? {
+        if (handlers.isEmpty()) return null
+        val exposed = LinkedHashSet<String>()
+        var anyOpinion = false
+        serialForEach(handlers, budgetMs, invoke) { _, r ->
+            val arr = r.optJSONArray("expose") ?: return@serialForEach
+            anyOpinion = true
+            for (i in 0 until arr.length()) arr.optString(i).trim().ifEmpty { null }?.let { exposed += it }
+        }
+        if (!anyOpinion) return null
+        for (rt in Runtimes.all) {
+            for (p in rt.callablesIn(abstained)) exposed += rt.callableNamesOf(p)
+        }
+        return exposed
     }
 
     /**
@@ -144,8 +202,13 @@ object AspectBus {
         for (p in handlers) {
             val remain = deadline - System.currentTimeMillis()
             if (remain <= 0) break
-            val r = invoke(p, remain) ?: continue
-            onResult(p, r)
+            val r = guard(p, remain, invoke) ?: continue
+            try {
+                onResult(p, r)
+            } catch (e: Throwable) {
+                // 消费侧（如采样参数合并、expose 并集）出错同样按「该处理器无返回」处理，不牵连整轮
+                android.util.Log.w("GGUF-gw", "aspect result ${p.id} 消费异常，已跳过：${e.message}")
+            }
         }
     }
 }

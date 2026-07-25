@@ -259,19 +259,13 @@ class Gateway(
         if (takeOver != null) return Plan(takeOver, null, reg.toolCallables, reg.afterReply, reg.continuation, isStream)
 
         // ---- curate 面：本轮给模型露哪些 callable（§13.4）。串行、快判定、总预算 150ms（禁调 LLM，同 route）。
-        // 无 curate 处理器 → exposure=null=全露，逐字节等价 v1；有处理器则取各自 expose[] 的并集收窄本轮教学。 ----
-        val exposure: Set<String>? = if (reg.curate.isEmpty()) null else {
-            val exposed = LinkedHashSet<String>()
-            var anyOpinion = false
-            AspectBus.serialForEach(
-                reg.curate, Aspects.CURATE_BUDGET_MS,
-                invoke = { p, remain -> PluginRuntime.dispatch(p.id, "curate", turn, remain) },
-            ) { _, r ->
-                val arr = r.optJSONArray("expose") ?: return@serialForEach
-                anyOpinion = true // 表态即计入（哪怕空数组＝"本轮啥都别露"）
-                for (i in 0 until arr.length()) arr.optString(i).trim().ifEmpty { null }?.let { exposed += it }
-            }
-            if (anyOpinion) exposed else null // 没有一个处理器表态 → 视为全露
+        // 无 curate 处理器 → exposure=null=全露，逐字节等价 v1；有处理器则取各自 expose[] 的并集
+        // ∪ 弃权者（没登记 curate 的插件）的 callable，收窄本轮教学。语义细节见 AspectBus.curateExposure。 ----
+        val exposure: Set<String>? = AspectBus.curateExposure(
+            reg.curate, reg.curateAbstained, Aspects.CURATE_BUDGET_MS,
+        ) { p, remain -> PluginRuntime.dispatch(p.id, "curate", turn, remain) }
+        if (exposure != null) {
+            android.util.Log.d("GGUF-gw", "curate exposure=${exposure.joinToString(",").ifEmpty { "(空)" }}")
         }
 
         // ---- context 面：并行，总预算 250ms；懒注入判定（尾部背景块）在 applyContext 里做 ----
@@ -465,23 +459,41 @@ class Gateway(
             }
         }
         // 运行时插件的教学条款（今仅 type:tool 的 <tool> 协议）。客户端自带原生 tools 时整段不注入（§6.9 透传）。
-        // exposure 由 curate 面算出；null（无 curate 处理器）= 全露，逐字节等价 v1。
-        if (!hasNativeTools) {
-            for (rt in Runtimes.all) {
-                val clause = rt.teachingClause(rt.callablesIn(active), exposure) ?: continue
+        // exposure 由 curate 面算出；null（无 curate 处理器）= 全露。
+        val teaching = if (hasNativeTools) emptyList() else Runtimes.all.mapNotNull { rt ->
+            rt.teachingClause(rt.callablesIn(active), exposure)
+        }
+        // 注入位置由「curate 有没有表态」决定，这是 KV 前缀缓存红线（§3 血泪教训的直接推论）：
+        // - exposure == null（默认，没有插件登记 curate）：教学条款逐轮完全一样 → 照旧拼进首条
+        //   system，逐字节等价 v1，前缀缓存全命中。
+        // - exposure != null：教学条款随本轮意图变（闲聊轮不露、记事轮露）。这种动态内容一旦拼进
+        //   首条 system，整条 prompt 从第一个 token 就变了 → 每次意图切换都要在手机 CPU 上重算
+        //   整段 prefill（秒级），省下的 150 token 远不够抵。所以改插到「末条用户消息之前」的
+        //   动态位（与 tail 同一位置纪律）：历史 KV 全保住，只重算末尾一小段。顺带也符合实测排布
+        //   结论——任务指令紧贴问题比压在最前面更容易被 1B 真正执行。
+        if (exposure == null) {
+            for (c in teaching) {
                 if (sb.isNotEmpty()) sb.append("\n\n")
-                sb.append(clause)
+                sb.append(c)
             }
         }
-        if (sb.isEmpty()) return
-        val suffix = sb.toString().trimEnd()
-        val idx = msgList.indexOfFirst { it.optString("role") == "system" }
-        if (idx >= 0) {
-            val m = msgList[idx]
-            val cur = m.optString("content")
-            m.put("content", if (cur.isEmpty()) suffix else "$cur\n\n$suffix")
-        } else {
-            msgList.add(0, JSONObject().put("role", "system").put("content", suffix))
+        if (sb.isNotEmpty()) {
+            val suffix = sb.toString().trimEnd()
+            val idx = msgList.indexOfFirst { it.optString("role") == "system" }
+            if (idx >= 0) {
+                val m = msgList[idx]
+                val cur = m.optString("content")
+                m.put("content", if (cur.isEmpty()) suffix else "$cur\n\n$suffix")
+            } else {
+                msgList.add(0, JSONObject().put("role", "system").put("content", suffix))
+            }
+        }
+        if (exposure != null && teaching.isNotEmpty()) {
+            val block = teaching.joinToString("\n\n").trimEnd()
+            val insertIdx = msgList.indexOfLast { it.optString("role") == "user" }
+            val m = JSONObject().put("role", "system").put("content", block)
+            if (insertIdx >= 0) msgList.add(insertIdx, m) else msgList.add(m)
+            android.util.Log.d("GGUF-gw", "curate 动态教学注入 ${block.length} 字（末条用户消息前，不动 head）")
         }
     }
 

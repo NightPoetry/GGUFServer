@@ -246,6 +246,11 @@
         if (!pool.length) return {};
         var hits = bm25(query, pool.map(function (p) { return p.text; }), cfg.recallN).map(function (h) { return pool[h.index]; });
         if (!hits.length) return {};
+        // 相关度**升序**排布（bm25 给的是降序，这里反过来）：最相关的一条排在最后、紧贴后面的
+        // 任务指令与问题。2026-07-13 实测（docs/记忆检索基准与重型记忆设计.md）——1B 判"资料能否
+        // 回答问题"，资料在前、任务框架在后 69% vs 反过来 46%；同理，块内也让最该被用上的那条
+        // 离指令最近。顺带 pageIn 也按同序，最相关者最后调入 → 在存放区（head）里也排最后。
+        hits = hits.reverse();
         var memLines = [], cross = 0;
         hits.forEach(function (o) {
           var localId;
@@ -261,7 +266,12 @@
         pushLog(st, '同轮召回 ' + hits.length + ' 条并续段' + (cross ? '（含跨会话 ' + cross + '）' : ''));
         return save(sid, st).then(function () {
           gguf.events.broadcast('mem-changed', { sessionId: sid });
-          return genContinuation(query, reply, memBlock);
+          var kind = calcKind(query);
+          if (!kind) return genContinuation(query, reply, memBlock);
+          // 涉及计算的问题走两段式；抽不到数值/出错都退回自然语言续段（续段绝不因此落空）
+          return calcContinuation(query, memBlock, kind).then(function (r) {
+            return r || genContinuation(query, reply, memBlock);
+          }, function () { return genContinuation(query, reply, memBlock); });
         });
       });
     });
@@ -284,6 +294,79 @@
     }, function () {
       return { content: '\n\n（我想起来了）' + memBlock.replace(/^·\s*/gm, '').replace(/\n/g, '；') };
     });
+  }
+
+  // ============================== 计算类记忆问答：模型只抽数字，算术交给代码 ==============================
+
+  /** 快判定本轮问题要不要算数（正则级、零成本），返回运算种类或 null。 */
+  function calcKind(q) {
+    var s = String(q || '');
+    if (!/一共|总共|总计|合计|加起来|总和|平均|最多|最少|最大|最小|最贵|最便宜|最高|最低|几次|几个|几天|几笔|多少次|多少笔|多少条|多少钱|花了多少|用了多少/.test(s)) return null;
+    if (/平均/.test(s)) return 'avg';
+    if (/最多|最大|最贵|最高/.test(s)) return 'max';
+    if (/最少|最小|最便宜|最低/.test(s)) return 'min';
+    if (/几次|几个|几天|几笔|多少次|多少笔|多少条/.test(s)) return 'count';
+    return 'sum';
+  }
+
+  /** 整数不带小数点、小数最多两位（免得冒出 0.30000000000000004 这种浮点噪声）。 */
+  function fmtNum(n) { return String(Math.round(Number(n) * 100) / 100); }
+
+  /**
+   * 两段式：① 模型只干「把记忆里的相关数值逐条抽出来」（json_schema 受限解码 + temp 0 +
+   * 资料在前/任务在后的排布）；② 加减乘除全部由 JS 算。1B 的算术不可靠，但"从文本里挑数字"
+   * 很稳——把不擅长的那半外包给代码，是本项目一贯的轮椅哲学（见《推理参数与外部知识架构研究》）。
+   * 抽不到数值就返回 null，交回自然语言续段，绝不硬凑一个算出来的数。
+   */
+  function calcContinuation(query, memBlock, kind) {
+    var user = '【记忆】\n' + memBlock + '\n\n从上面的记忆里，把与「' + truncate(query, 80) +
+      '」有关的数值逐条抽出来：label = 该条对应的事项（简短），value = 数字本身（不要单位）。' +
+      '记忆里没有相关数值就返回空数组，不要编造。';
+    return gguf.llm.chat({
+      messages: [{ role: 'user', content: user }],
+      temperature: 0, max_tokens: 256,
+      json_schema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { label: { type: 'string' }, value: { type: 'number' } },
+              required: ['label', 'value']
+            }
+          }
+        },
+        required: ['items']
+      }
+    }).then(function (res) {
+      var raw = [];
+      try { var o = JSON.parse(String((res && res.content) || '')); if (o && Array.isArray(o.items)) raw = o.items; } catch (e) { raw = []; }
+      var items = [];
+      raw.forEach(function (it) {
+        // 注意 Number(null)===0、Number('')===0：受限解码偶尔给出空值，直接 Number() 会把"没有数"
+        // 悄悄算成 0，污染总和/计数/平均。先把空值挡掉，只留真的数字。
+        if (!it || it.value === null || it.value === undefined || it.value === '') return;
+        var v = Number(it.value);
+        if (isFinite(v)) items.push({ label: String(it.label || '').trim() || '?', value: v });
+      });
+      if (!items.length) return null;
+      var vals = items.map(function (it) { return it.value; });
+      var detail = items.map(function (it) { return it.label + ' ' + fmtNum(it.value); }).join('、');
+      var head;
+      if (kind === 'count') {
+        head = '一共有 ' + items.length + ' 条';
+      } else if (kind === 'sum') {
+        head = '加起来一共是 ' + fmtNum(vals.reduce(function (a, b) { return a + b; }, 0));
+      } else if (kind === 'avg') {
+        head = '平均是 ' + fmtNum(vals.reduce(function (a, b) { return a + b; }, 0) / items.length);
+      } else {
+        var pick = items[0];
+        items.forEach(function (it) { if (kind === 'max' ? it.value > pick.value : it.value < pick.value) pick = it; });
+        head = (kind === 'max' ? '最多的是' : '最少的是') + '「' + pick.label + '」' + fmtNum(pick.value);
+      }
+      return { content: '\n\n（我按记忆算了一下）' + head + '。依据：' + detail + '。' };
+    }, function () { return null; });
   }
 
   // ============================== 记忆模型 ==============================

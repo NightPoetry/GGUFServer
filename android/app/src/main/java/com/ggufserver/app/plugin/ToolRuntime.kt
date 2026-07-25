@@ -20,6 +20,13 @@ interface CapabilityRuntime {
     fun callablesIn(active: List<PluginManifest>): List<PluginManifest>
 
     /**
+     * 某插件在本 type 下提供的 callable 名字。内核用它算 curate 的**弃权豁免**（§13.4）：
+     * 没在 curate 面表态的插件，其 callable 不因别人的收窄而消失。内核因此不必认识
+     * `manifest.tools[].name` 这种 type 专属形状。
+     */
+    fun callableNamesOf(p: PluginManifest): List<String>
+
+    /**
      * curate/context 面：教模型怎么触发本 type 的 callable，返回追加进首条 system 的教学条款；空则 null。
      * [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）；
      * 非 null = 只教 name ∈ exposure 的 callable（小模型上下文金贵，按本轮意图收窄）。
@@ -62,6 +69,8 @@ object ToolRuntime : CapabilityRuntime {
 
     override fun callablesIn(active: List<PluginManifest>): List<PluginManifest> =
         active.filter { it.tools.isNotEmpty() }
+
+    override fun callableNamesOf(p: PluginManifest): List<String> = p.tools.map { it.name }
 
     override fun teachingClause(callables: List<PluginManifest>, exposure: Set<String>?): String? {
         // 先按 exposure 逐工具过滤生成条目行；exposure==null（无 curate 处理器）时全部保留＝等价 v1。

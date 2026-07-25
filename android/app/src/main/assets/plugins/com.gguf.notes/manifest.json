@@ -1,7 +1,7 @@
 {
   "id": "com.gguf.notes",
   "name": "便签",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "apiVersion": 1,
   "description": "会话专属便签：记要点、支持模型对话中主动记录/修改/清空",
   "author": "gguf",
@@ -30,6 +30,7 @@
   ],
   "hooks": [
     "route",
+    "curate",
     "handle",
     "context",
     "tool"
