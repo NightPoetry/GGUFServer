@@ -50,12 +50,26 @@
     return midi >= 0 && midi <= 127 ? midi : null;
   }
 
+  /**
+   * 调号是不是小调。**`major` 里有个 m**，所以绝不能用 /m|min|小调/ 这种松判定——真机上就栽在
+   * 这儿：模型写了「C major」，判定说「已经是小调」于是情绪夹取整个跳过，结果「悲伤」配了 C 大调。
+   * 判法：削掉音名后看剩下的部分，先排除 maj/大调，再认 m / min / minor / 小调。
+   */
+  function keyIsMinor(k) {
+    var rest = String(k || '').replace(/^[A-Ga-g][#b]?/i, '').replace(/[\s\-_]/g, '').toLowerCase();
+    if (!rest) return false;
+    if (rest.indexOf('小调') >= 0) return true;
+    if (rest.indexOf('maj') === 0 || rest.indexOf('大调') >= 0) return false;
+    return rest === 'm' || rest.indexOf('min') === 0;
+  }
+
   function parseKey(s) {
-    var m = /^([A-Ga-g])([#b]?)\s*(m|min|minor|小调)?/.exec(String(s || '').trim());
+    var t = String(s || '').trim();
+    var m = /^([A-Ga-g])([#b]?)/.exec(t);
     if (!m) return { root: 0, minor: false };
     var pc = PITCH_CLASS[m[1].toUpperCase()];
     if (m[2] === '#') pc += 1; else if (m[2] === 'b') pc -= 1;
-    return { root: ((pc % 12) + 12) % 12, minor: !!m[3] };
+    return { root: ((pc % 12) + 12) % 12, minor: keyIsMinor(t) };
   }
 
   function degreeToMidi(deg, accidental, octShift, key) {
@@ -140,7 +154,9 @@
     // 调号会把下一行的 m 吃进来变成 A 小调——大调秒变小调，情绪整个反了（单测抓到的真 bug）。
     var mT = /tempo[ \t]*[:：][ \t]*(\d{2,3})/i.exec(text);
     if (mT) tempo = Math.min(200, Math.max(40, parseInt(mT[1], 10)));
-    var mK = /key[ \t]*[:：][ \t]*([A-Ga-g][#b]?[ \t]*(?:m|min|minor|小调)?)/i.exec(text);
+    // 捕获要把 major/minor/大调/小调 整段吃进来（曾只捕到 "C"，把 C-major 当成 C 大调是碰巧对，
+    // 但 Cmajor 会被 (?:m|…) 当成小调——都由 keyIsMinor 统一裁决，这里只负责别截断）。
+    var mK = /key[ \t]*[:：][ \t]*([A-Ga-g][#b]?[ \t\-_]*(?:maj(?:or)?|min(?:or)?|m|大调|小调)?)/i.exec(text);
     if (mK) keyStr = mK[1].trim();
     var mM = /mood[ \t]*[:：][ \t]*([A-Za-z一-鿿]{1,8})/i.exec(text);
     if (mM) mood = mM[1];
@@ -325,7 +341,20 @@
   // 用户在要求音乐/旋律时才露。教学条款约 120 token，露多了既费预算又给 1B「手痒乱调」的机会；
   // 漏了则用户要曲子却拿不到工具——按 §6.14 的取向（recall 优先），这里判得稍宽一点。
   // `.{0,8}` 而不是 `.{0,4}`：「写首 C 大调的小曲子」「来首 C 大调的小曲子」里隔了 7 个字（实测漏判）。
-  var musicRe = /作曲|谱[一个]?曲|写[一段个首]{0,2}.{0,8}(?:曲|旋律|乐句|melody)|来[一段个首]{0,2}.{0,8}(?:曲|旋律|音乐|乐句)|即兴|哼[一段个]|弹[一段个首]|midi|钢琴曲|生成.{0,4}音乐|编[一段个]?曲|配[个段]?旋律|听.{0,3}(?:曲|旋律)/i;
+  // **真机漏判修正（2026-07-27）**：用户说「帮我写一个悲伤的调」时既没接管也没露工具，模型只能
+  // 自己发挥去反问「你想要什么风格」——因为原正则只认「曲/旋律/乐句」，**不认「调」**（曲调/调子）。
+  // 这是我自己写语料时没想到的说法（又一次过拟合的教训）。同时补：谱/伴奏/背景音乐/BGM/主旋律。
+  // 「调」必须挡掉它的一堆非音乐义（调用/调整/调试/调查/空调/语调…），所以带否定预查。
+  var TUNE = '调(?!用|整|试|查|节|度|侃|剂|研|配|色|味|料|停|派|职|岗|价|息|解|和|皮|教|养|理|动|换|来|走|回)';
+  var musicRe = new RegExp(
+    '作曲|谱[一段个首]{0,2}.{0,4}(?:曲|子|' + TUNE + ')|编[一段个]?曲|即兴|钢琴曲|主题曲|背景音乐|bgm|midi'
+    + '|写[一段个首]{0,2}.{0,8}(?:曲|旋律|乐句|melody|' + TUNE + '|伴奏|主旋律)'
+    + '|来[一段个首]{0,2}.{0,8}(?:曲|旋律|音乐|乐句|' + TUNE + ')'
+    + '|生成.{0,4}(?:音乐|旋律|伴奏)|配[个段]?(?:旋律|伴奏|曲)|哼[一段个]|弹[一段个首]'
+    + '|听.{0,3}(?:曲|旋律)', 'i');
+  // 「使用工具」这类祈使：本身不含音乐词，但在**刚出过乐句的会话**里就是「用你那个作曲工具」。
+  // 与续写同一道门（见下面 pieceSessions），所以不会在别的语境里劫持。
+  var toolHintRe = /用(?:一下)?(?:这个|那个|你的)?工具|使用工具|调用工具|用插件|用那个插件/;
   // 否定闸门：在**谈论**音乐/工具本身，不是在要一段（同 route 那条教训：别把谈论当成指令）
   var talkRe = /怎么用|如何使用|原理|为什么|支持哪些|能不能导出|什么格式|midi 是什么|midi是什么/i;
 
@@ -333,7 +362,8 @@
 
   gguf.hooks.curate(function (turn) {
     var t = String((turn && turn.text) || '');
-    var want = wantsMusic(t) || (contRe.test(t) && isPieceSession(turn && turn.sessionId));
+    var want = wantsMusic(t)
+      || ((contRe.test(t) || toolHintRe.test(t)) && isPieceSession(turn && turn.sessionId));
     return { expose: want ? ['midi.play'] : [] };
   });
 
@@ -370,7 +400,7 @@
     if (wantsMusic(t)) return { takeOver: true };
     // **续写只在这个会话刚出过乐句时才接管**：「再来一段」在别的语境里是「再写一段文章/故事」，
     // 无条件接管就是劫持整轮（§6.2 route 的第一纪律：precision 优先，宁可漏）。
-    if (contRe.test(t) && isPieceSession(sid)) return { takeOver: true };
+    if ((contRe.test(t) || toolHintRe.test(t)) && isPieceSession(sid)) return { takeOver: true };
     return {};
   });
 
@@ -378,10 +408,12 @@
     var ask = String((turn && turn.text) || '');
     var sessionId = turn && turn.sessionId;
     var mood = detectMood(ask);
-    var wantsCont = contRe.test(ask);
+    var wantsCont = contRe.test(ask) || toolHintRe.test(ask);
 
-    return (wantsCont && sessionId ? gguf.storage.get('last:' + sessionId).catch(function () { return null; })
-                                   : Promise.resolve(null)).then(function (prev) {
+    var memPrev = wantsCont && sessionId ? lastPiece[sessionId] : null;
+    return (memPrev ? Promise.resolve(memPrev)
+      : (wantsCont && sessionId ? gguf.storage.get('last:' + sessionId).catch(function () { return null; })
+                                : Promise.resolve(null))).then(function (prev) {
       if (prev && (!prev.pats || !prev.pats.length)) prev = null;
       ctl.status(prev ? '接着上一段写…' : '正在编曲…');
       return gguf.llm.chat({
@@ -549,9 +581,8 @@
     if (t < mood.bpm[0] || t > mood.bpm[1]) t = Math.min(mood.bpm[1], Math.max(mood.bpm[0], t));
     a.tempo = t;
     var k = String(a.key || 'C').trim();
-    var isMinor = /m|min|小调/i.test(k);
-    if (mood.minor && !isMinor) a.key = k.replace(/\s*(?:maj|major|大调)\s*$/i, '') + 'm';
-    if (!mood.minor && isMinor) a.key = k.replace(/\s*(?:m|min|minor|小调)\s*$/i, '');
+    var bare = (/^[A-Ga-g][#b]?/i.exec(k) || ['C'])[0];      // 只留音名，调式由情绪定
+    if (mood.minor !== keyIsMinor(k)) a.key = bare + (mood.minor ? 'm' : '');
     if (!a.inst) a.inst = mood.inst;
     return a;
   }
@@ -613,7 +644,14 @@
 
   function durSec(sc) { return (sc.totalTicks / sc.tpq) * (60 / sc.tempo); }
 
-  /** 记住本会话上一轮的片段与编排，供续写接着长（卡片会被回收，状态只能落 storage）。 */
+  /**
+   * 记住本会话上一轮的片段与编排，供续写接着长。
+   *
+   * **同步内存副本 + 异步落盘两条**：只落 storage 会有竞态——真机上「写一首悲伤的调」紧接着
+   * 「使用工具」，第二轮赶在 storage.set 落地之前到达，prev 读成空、于是另起了一首新曲子
+   * （调、速度、情绪全变了）。内存副本立刻可用，落盘那份留给 service WebView 重建后接着用。
+   */
+  var lastPiece = {};
   function rememberLast(sessionId, script, sc) {
     if (!sessionId) return Promise.resolve();
     var pats = [];
@@ -621,10 +659,17 @@
       pats.push({ name: n, notes: notes.trim() }); return '';
     });
     var play = (/^play\s*[:：]\s*(.+)$/im.exec(script) || [])[1] || '';
-    return gguf.storage.set('last:' + sessionId, {
+    var state = {
       key: sc.key, tempo: sc.tempo, inst: sc.inst.melody, mood: sc.mood,
       pats: pats, play: play.trim(), ts: Date.now(),
-    }).catch(function () {});
+    };
+    lastPiece[sessionId] = state;                       // 同步，下一轮立刻读得到
+    var keys = Object.keys(lastPiece);
+    if (keys.length > 24) {                            // 有界
+      keys.sort(function (a, b) { return lastPiece[a].ts - lastPiece[b].ts; });
+      for (var i = 0; i < keys.length - 24; i++) delete lastPiece[keys[i]];
+    }
+    return gguf.storage.set('last:' + sessionId, state).catch(function () {});
   }
 
   function intro(sc, isCont) {

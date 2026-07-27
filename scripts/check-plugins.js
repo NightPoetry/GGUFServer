@@ -516,6 +516,21 @@ function checkMidi() {
       ok(sad.card.mood === '悲伤', `情绪落进乐句（实得 ${sad.card.mood}）`);
       ok(/B/.test(sad.card.arrange), `有对比段（编排 ${sad.card.arrange}）`);
     }
+    // **调号的各种写法都要能被夹取**：真机上模型写了带 major 的形式，而旧判定用 /m|min|小调/
+    // ——「major」里有个 m，被当成「已经是小调」于是整个跳过，结果「悲伤」配了 C 大调。
+    for (const k of ['C', 'C major', 'Cmajor', 'C-major', 'Cmaj', 'C 大调', 'Cmin', 'A小调']) {
+      const r = await runHandle(JSON.stringify({ tempo: 130, key: k, patA: 'C4 E4 G4 -', play: 'A A' }),
+        '写一个悲伤的调', 'k' + k);
+      ok(!!r.card && r.card.minor === true && r.card.tempo <= 76,
+        `悲伤 + 模型 key=${JSON.stringify(k)} → 小调且慢（实得 ${r.card && r.card.key} ${r.card && r.card.tempo}BPM）`);
+    }
+    for (const k of ['Am', 'A minor', 'C小调']) {
+      const r = await runHandle(JSON.stringify({ tempo: 60, key: k, patA: 'C4 E4 G4 -', play: 'A A' }),
+        '写一段欢快的曲子', 'j' + k);
+      ok(!!r.card && r.card.minor === false && r.card.tempo >= 108,
+        `欢快 + 模型 key=${JSON.stringify(k)} → 大调且快（实得 ${r.card && r.card.key} ${r.card && r.card.tempo}BPM）`);
+    }
+
     const happy = await runHandle(JSON.stringify({
       tempo: 60, key: 'Am', patA: 'C4 E4 G4 -', play: 'A A',
     }), '写一段欢快的曲子', 's2');
@@ -546,6 +561,12 @@ function checkMidi() {
       ok(cont.card.totalTicks > c1.totalTicks, `曲子变长了（${Math.round(c1.totalTicks / c1.barTicks)} → ${Math.round(cont.card.totalTicks / cont.card.barTicks)} 小节）`);
       ok(/接着上一段/.test(cont.reply), `回复点明是续写（实得「${cont.reply.slice(0, 18)}…」）`);
     }
+    // 「使用工具」也算续写意图；且 storage 落盘有延迟时也必须接得住（真机竞态：第二轮赶在
+    // storage.set 落地之前到达，prev 读成空 → 另起了一首调/速度/情绪全变的新曲子）
+    const tool = await runHandle(JSON.stringify({ patA: 'E5 D5 C5 -', play: 'A A' }), '使用工具');
+    ok(!!tool.card && tool.card.key === sad.card.key && tool.card.tempo === sad.card.tempo,
+      `「使用工具」按续写处理且沿用同调同速（实得 ${tool.card && tool.card.key} ${tool.card && tool.card.tempo}BPM）`);
+
     // 截断的 JSON 要能抢救：真机上模型偶尔在某个字符串里跑飞、撞 max_tokens 后 JSON 断尾，
     // 整份 parse 失败会让这一轮白给（1/3 概率踩到）。schema 已加 maxLength 防跑飞，这里兜第二层。
     const cut = await runHandle(
@@ -577,6 +598,22 @@ function checkMidi() {
     ['写首 C 大调的小曲子', true, '写曲子'],
     ['即兴弹一段', true, '即兴'],
     ['来首 C 大调的小曲子', true, '真机撞到的漏判：来…曲 隔了 7 个字'],
+    // ↓ 真机上用户真实说法，原正则全漏（只认「曲/旋律/乐句」，不认「调」）
+    ['帮我写一个悲伤的调', true, '★真机漏判：调＝曲调'],
+    ['写个欢快的调子', true, '★调子'],
+    ['谱一段曲', true, '★谱…曲'],
+    ['来个背景音乐', true, '★背景音乐'],
+    ['来首BGM', true, '★BGM'],
+    ['给这段配个伴奏', true, '★伴奏'],
+    ['写段主旋律', true, '★主旋律'],
+    // ↓「调」的非音乐义必须挡住（否则收得太宽会劫持一堆正常请求）
+    ['帮我调用这个接口', false, '调用'],
+    ['把参数调整一下', false, '调整'],
+    ['这段代码要调试', false, '调试'],
+    ['空调坏了', false, '空调'],
+    ['他的语调很奇怪', false, '语调'],
+    ['帮我查一下调休安排', false, '调休'],
+    ['把颜色调淡一点', false, '调色'],
     ['今天天气真不错', false, '闲聊'],
     ['帮我写一段排序代码', false, '干活'],
     ['MIDI 是什么格式', false, '在问概念'],

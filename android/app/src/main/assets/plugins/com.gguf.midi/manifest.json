@@ -1,7 +1,7 @@
 {
   "id": "com.gguf.midi",
   "name": "乐句",
-  "version": "1.2.4",
+  "version": "1.2.7",
   "apiVersion": 1,
   "description": "让模型作曲：可点情绪（悲伤/欢快/安静…，乐理由插件把住），说「再来一段」就同调同速地接着长——片段+编排、多轨乐器、端上合成，完全离线",
   "author": "gguf",
