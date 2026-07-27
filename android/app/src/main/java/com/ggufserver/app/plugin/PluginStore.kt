@@ -56,7 +56,11 @@ object PluginStore {
      * 在网关请求管线上执行的钩子。manifest.hooks 里不在此集合的钩子（如 messageAction 消息角标，
      * 由聊天界面直接派发）不算中间件——只声明这类钩子的插件绝不能把网关拖出零插件快路径。
      */
-    private val GATEWAY_HOOKS = setOf("route", "context", "afterReply", "continuation", "params")
+    // `curate` 是 §13.1 里正式的管线面，2026-07-27 补进来：漏了它的话，一个**只登记 curate**
+    // 的插件（不提供工具、只决定本轮该露别家的哪些能力——正是 §13.4 收窄语义的典型形态）会被
+    // 判成「不是中间件」，进而走零插件快路径 / 被 activePlugins 过滤掉，curate 面永不分发，
+    // 且零日志零提示。今天内置的 tts 侥幸没踩到，是因为它另有 tools 撑着，不是因为 curate。
+    private val GATEWAY_HOOKS = setOf("route", "curate", "context", "afterReply", "continuation", "params")
 
     private lateinit var appContext: Context
     private lateinit var pluginsDir: File

@@ -66,6 +66,22 @@ class Gateway(
      */
     private val winStartBySession = ConcurrentHashMap<String, Int>()
 
+    /**
+     * 每个 context 插件上一轮**成功**给出的 head（键 `sessionId|pluginId`），用于本轮它超时/异常时
+     * 顶上（2026-07-27 补）。
+     *
+     * 为什么必须有：`head` 拼进首条 system，红线 5 要求它**逐轮字节稳定**。原先某插件本轮没返回就
+     * 把它的 head 整段丢掉——首条 system 的字节于是随「这一轮它快不快」抖动，抖出去那轮和抖回来
+     * 那轮各重算一次整段 prefill（真机口径 169 token ≈ 1.9s），而且模型这一轮会**凭空少掉人设或
+     * 长期记忆**、日志里只有一行 debug。这与 v1.1.5 修的「教学注入位随 curate 成败抖动」是同一个
+     * 病：让逐轮可变的运行结果去决定本应稳定的字节。
+     *
+     * 复用为什么安全：head 按契约本就该逐轮一致，所以「上一轮的值」正是它这一轮**应该**给的值；
+     * 插件真要改 head（便签被编辑），下一次成功分发就会覆盖这里。只在 null（超时/异常）时顶，
+     * 成功返回空字符串也照样记——那是它主动说「我这轮没有 head」。
+     */
+    private val lastHeadBySessionPlugin = ConcurrentHashMap<String, String>()
+
     /** afterReply 在“没有工具标记”的流式回合里是纯异步旁路，不能用请求线程的协程作用域（那个作用域随响应结束而结束）。 */
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -184,7 +200,7 @@ class Gateway(
             runCatching {
                 val assembly = assembleWindow(sessionHeader, msgList, contextSize)
                 stripGgufFields(root, msgList)
-                applyContext(msgList, emptyList(), assembly.anyCrossDay)
+                applyContext(msgList, emptyList(), assembly.anyCrossDay, sessionHeader)
             }.onFailure { stripGgufFields(root, msgList) }
             root.put("messages", toJsonArray(msgList))
             forwardPlain(client, requestLine, headers, root.toString().toByteArray(Charsets.UTF_8))
@@ -272,7 +288,7 @@ class Gateway(
         val results = AspectBus.parallel(reg.context, Aspects.CONTEXT_BUDGET_MS) { p, remain ->
             PluginRuntime.dispatch(p.id, "context", turn, remain)
         }
-        applyContext(msgList, results, anyCrossDay)
+        applyContext(msgList, results, anyCrossDay, turn.optString("sessionId").ifEmpty { null })
 
         // ---- context 面（教学部分）：systemClause + 各运行时插件按 curate 的 exposure 生成的 callable 教学，逐轮字节稳定 ----
         // 注入位判据用 curateRegistered（静态登记）而非 curate（本轮就绪者）：位置只能随「用户开关
@@ -320,7 +336,12 @@ class Gateway(
      * 懒注入判定（血泪教训 §3）：插件都没给 tail、窗口内也没有跨天消息 → 整个 tail 块零注入，
      * 走完整 KV 缓存快路径；一旦需要注入，必须是独立 system 消息，绝不能拼进用户消息前缀。
      */
-    private fun applyContext(msgList: MutableList<JSONObject>, results: List<Pair<PluginManifest, JSONObject?>>, anyCrossDay: Boolean) {
+    private fun applyContext(
+        msgList: MutableList<JSONObject>,
+        results: List<Pair<PluginManifest, JSONObject?>>,
+        anyCrossDay: Boolean,
+        sessionId: String?,
+    ) {
         val perPluginBudget = (contextSize / 8).coerceAtLeast(64)
         val heads = ArrayList<String>()
         val tails = ArrayList<String>()
@@ -330,9 +351,23 @@ class Gateway(
                 "context ${plugin.id}: " +
                     (r?.let { "head=${it.optString("head").length} tail=${it.optString("tail").length}" } ?: "null(超时/异常)")
             )
-            r ?: continue
+            val headKey = if (sessionId != null) "$sessionId|${plugin.id}" else null
+            if (r == null) {
+                // 本轮没返回：用它上一轮成功给出的 head 顶上，别让首条 system 的字节抖动（见
+                // [lastHeadBySessionPlugin]）。tail 不顶——tail 本就是逐轮可变的懒注入块，
+                // 丢了不动 KV 前缀；顶上反而可能把过时的回忆塞给模型。
+                val cached = headKey?.let { lastHeadBySessionPlugin[it] }
+                if (!cached.isNullOrEmpty()) {
+                    heads += cached
+                    ServerBus.appendLog("[插件:${plugin.id}] context 本轮无返回，已复用上一轮的 head（保 KV 前缀字节稳定）")
+                } else if (headKey != null) {
+                    ServerBus.appendLog("[插件:${plugin.id}] context 本轮无返回（超时/异常），本轮无该插件注入")
+                }
+                continue
+            }
             var head = r.optString("head", "")
             var tail = r.optString("tail", "")
+            if (headKey != null) lastHeadBySessionPlugin[headKey] = head   // 成功即记，空串也记
             if (head.isEmpty() && tail.isEmpty()) continue
             val headTok = MemoryIndex.estimateTokens(head)
             val tailTok = MemoryIndex.estimateTokens(tail)

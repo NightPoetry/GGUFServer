@@ -131,6 +131,17 @@ object AspectBus {
     }
 
     /**
+     * **可用预算下限**（2026-07-27 补）：串行面共享一个 deadline，排在后面的处理器只拿得到剩下的零头。
+     * 一次分发的固定开销是「切主线程 → `evaluateJavascript` → JS 执行 → `respond` 回程」两跳 looper，
+     * 剩 10ms 派下去必然超时——而超时会被 `PluginRuntime.dispatch` 记进**熔断账本**，连续三次就把插件
+     * 永久旁路（熔断状态落盘）。**被同面的前一个处理器饿死 ≠ 这个插件坏了**，跟「没准备好 ≠ 坏了」
+     * （§13.4 纪律 3 补注）是同一条道理，所以剩余预算低于下限时**根本不派**，也就不会记成它的错。
+     *
+     * 取 40ms：真机实测稳态一次 route/curate 往返约 45ms（含两个插件），单个来回压到 40ms 已是下限。
+     */
+    const val MIN_VIABLE_BUDGET_MS = 40L
+
+    /**
      * route 语义：串行分发，共享 [budgetMs] deadline，第一个返回 `takeOver:true` 的处理器接管本轮
      * （后续不再询问）。返回接管者，或 null（无人接管 / 无处理器 / 预算耗尽）。
      */
@@ -143,7 +154,7 @@ object AspectBus {
         val deadline = System.currentTimeMillis() + budgetMs
         for (p in handlers) {
             val remain = deadline - System.currentTimeMillis()
-            if (remain <= 0) break
+            if (remain < MIN_VIABLE_BUDGET_MS) break   // 预算见底：不派（派了也是白记它一次超时）
             val r = guard(p, remain, invoke)
             if (r?.optBoolean("takeOver") == true) return p
         }
@@ -165,7 +176,9 @@ object AspectBus {
             handlers.map { p ->
                 async {
                     val remain = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
-                    p to (if (remain <= 0) null else guard(p, remain, invoke))
+                    // 并行面理论上大家同时起跑、都拿得到接近满额的预算；真出现零头（协程调度被主线程
+                    // 拖住）时同样不派，别把「没派下去」记成这个插件超时（见 MIN_VIABLE_BUDGET_MS）。
+                    p to (if (remain < MIN_VIABLE_BUDGET_MS) null else guard(p, remain, invoke))
                 }
             }.awaitAll()
         }
@@ -195,7 +208,13 @@ object AspectBus {
         if (handlers.isEmpty()) return null
         val exposed = LinkedHashSet<String>()
         var anyOpinion = false
-        serialForEach(handlers, budgetMs, invoke) { _, r ->
+        // 预算见底、压根没派到的处理器：**没机会表态 ≠ 弃权失败**，按弃权处理（纪律 3 的第二个例外，
+        // 与「没准备好」同源）。注意区分：真的派下去了、它自己抛异常/超时的，仍按纪律 3 藏它的工具。
+        val neverAsked = ArrayList<PluginManifest>()
+        serialForEach(
+            handlers, budgetMs, invoke,
+            onSkipped = { neverAsked += it },
+        ) { _, r ->
             val arr = r.optJSONArray("expose") ?: return@serialForEach
             anyOpinion = true
             for (i in 0 until arr.length()) arr.optString(i).trim().ifEmpty { null }?.let { exposed += it }
@@ -203,6 +222,7 @@ object AspectBus {
         if (!anyOpinion) return null
         for (rt in Runtimes.all) {
             for (p in rt.callablesIn(abstained)) exposed += rt.callableNamesOf(p)
+            for (p in rt.callablesIn(neverAsked)) exposed += rt.callableNamesOf(p)
         }
         return exposed
     }
@@ -215,13 +235,21 @@ object AspectBus {
         handlers: List<PluginManifest>,
         budgetMs: Long,
         invoke: suspend (PluginManifest, Long) -> JSONObject?,
+        /** 预算见底、**根本没派给它**的处理器（不是它的错，见 [MIN_VIABLE_BUDGET_MS]）。 */
+        onSkipped: (PluginManifest) -> Unit = {},
         onResult: (PluginManifest, JSONObject) -> Unit,
     ) {
         if (handlers.isEmpty()) return
         val deadline = System.currentTimeMillis() + budgetMs
+        var starved = false
         for (p in handlers) {
             val remain = deadline - System.currentTimeMillis()
-            if (remain <= 0) break
+            if (starved || remain < MIN_VIABLE_BUDGET_MS) {
+                starved = true            // 预算见底：后面的一个都不派，逐个记成「没机会表态」
+                android.util.Log.d("GGUF-gw", "aspect ${p.id} 跳过：本面预算已见底（不计熔断）")
+                onSkipped(p)
+                continue
+            }
             val r = guard(p, remain, invoke) ?: continue
             try {
                 onResult(p, r)

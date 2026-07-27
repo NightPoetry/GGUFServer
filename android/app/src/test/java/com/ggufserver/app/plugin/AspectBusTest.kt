@@ -165,6 +165,47 @@ class AspectBusTest {
         assertEquals(setOf("third.run"), e)   // a 自己收了，但不许替 third 做决定
     }
 
+    // ---------- 「被饿死」≠「坏了」：串行面共享预算的下限（2026-07-27） ----------
+
+    @Test
+    fun `剩余预算低于下限时根本不派 免得把饿死记成它超时`() = runBlocking {
+        val a = manifest("a", hooks = listOf("curate"))
+        val b = manifest("b", hooks = listOf("curate"))
+        val asked = ArrayList<String>()
+        AspectBus.serialForEach(
+            listOf(a, b), budgetMs = 150,
+            invoke = { p, _ ->
+                asked += p.id
+                delay(140)          // 第一个几乎吃光预算，b 只剩十几毫秒
+                JSONObject()
+            },
+            onSkipped = {},
+        ) { _, _ -> }
+        assertEquals("b 只剩零头，派下去必然超时、还要被记一次熔断，所以根本不该派", listOf(a.id), asked)
+    }
+
+    @Test
+    fun `没机会表态的处理器按弃权处理 它的工具不该被藏起来`() = runBlocking {
+        val notes = manifest("notes", hooks = listOf("curate"), tools = listOf("notes.append"))
+        val tts = manifest("tts", hooks = listOf("curate"), tools = listOf("tts.say"))
+        // notes 吃光预算并表态「我这边啥都别露」；tts 排在后面，压根没被问到。
+        val e = AspectBus.curateExposure(listOf(notes, tts), emptyList(), 150) { p, _ ->
+            if (p.id == notes.id) { delay(140); JSONObject().put("expose", JSONArray()) } else JSONObject()
+        }
+        assertEquals("没被问到 ≠ 表态失败：tts 的工具应按弃权豁免保留", setOf("tts.say"), e)
+    }
+
+    @Test
+    fun `派下去了但自己抛异常的 仍按纪律 3 藏它的工具`() = runBlocking {
+        val a = manifest("a", hooks = listOf("curate"), tools = listOf("a.do"))
+        val b = manifest("b", hooks = listOf("curate"), tools = listOf("b.do"))
+        val e = AspectBus.curateExposure(listOf(a, b), emptyList(), 5_000) { p, _ ->
+            if (p.id == a.id) JSONObject().put("expose", JSONArray()) else throw RuntimeException("插件炸了")
+        }
+        // b 真的被派了、是它自己坏的 → 教了也白教（它的 tool 钩子同样跑不了），维持原语义
+        assertEquals(emptySet<String>(), e)
+    }
+
     // ---------- 「没准备好」≠「坏了」：service WebView 冷启窗口（2026-07-27） ----------
 
     @Test

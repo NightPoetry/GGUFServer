@@ -163,12 +163,18 @@ object PluginRuntime {
     }
 
     private fun destroyService(id: String) {
+        // **摘表要同步做，销毁才 post 到主线程**（2026-07-27 修）：[reconcile] 跑在
+        // Dispatchers.Default，若 `serviceViews.remove` 也排进主线程队列，就会出现
+        // 「禁用→立刻重新启用」时 reconcile#2 看见旧条目还在、以为无需重建，随后主线程才把它销毁
+        // ——终态是「插件已启用、却没有 service WebView」，此后每次 dispatch 都静默返回 null，
+        // 工具"点了没反应"且不记任何错。摘表同步化后这个窗口不存在。
         serviceReady.remove(id)
+        val held = serviceViews.remove(id)
         for (call in pending.values) {
             if (call.pluginId == id) call.deferred.completeExceptionally(PluginUnavailable())
         }
+        if (held == null) return
         mainHandler.post {
-            val held = serviceViews.remove(id) ?: return@post
             runCatching { held.webView.evaluateJavascript("__ggufEmit(" + JSONObject.quote("disable") + ",\"null\")", null) }
             held.webView.destroy()
         }
@@ -202,7 +208,13 @@ object PluginRuntime {
      * 调用方——网关——一律当作“这个插件本轮无意见”处理，绝不因插件而阻塞转发）。
      */
     suspend fun dispatch(pluginId: String, hook: String, payload: JSONObject, budgetMs: Long): JSONObject? {
-        val held = serviceViews[pluginId] ?: return null
+        val held = serviceViews[pluginId] ?: run {
+            // 启用中的插件却没有 service WebView：不该发生（[reconcile] 会补建）。真发生时它是
+            // **静默的能力丢失**——工具"点了没反应"、钩子恒不响应，却不记错也不进熔断。留一行日志
+            // 让它至少可被发现（不记熔断：这不是插件的错）。
+            android.util.Log.w("GGUF-gw", "dispatch $pluginId/$hook 无 service WebView（已禁用或待重建）")
+            return null
+        }
         // service.js 还没加载完：这次调用注定没人接。立刻当「本轮无返回」返回，**且不记熔断**——
         // 「没准备好」不是「坏了」（熔断状态落盘，冷启期连发几条就能把好插件永久旁路）。
         if (!serviceReady.contains(pluginId)) {
