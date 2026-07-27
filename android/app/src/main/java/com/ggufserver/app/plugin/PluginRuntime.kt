@@ -67,6 +67,21 @@ object PluginRuntime {
 
     private data class Held(val webView: WebView, val bridge: PluginBridge)
     private val serviceViews = ConcurrentHashMap<String, Held>()
+
+    /**
+     * service WebView 已经**加载完 service.js**、能接住 `__ggufDispatch` 的插件集合。
+     *
+     * 创建 WebView 与「页面加载完」之间有几百毫秒到几秒的窗口（App 冷启时尤其明显）。这段时间里
+     * `evaluateJavascript` 打进去等于石沉大海：`__ggufDispatch` 还没定义，没人 respond，只能等超时。
+     * 后果有三个，都不该发生：①白白吃掉整个钩子预算（route/curate 各 150ms）；②按「超时」记进
+     * 熔断计数，**而熔断状态是落盘的**——冷启后连发三条请求就能把一个好插件永久旁路；
+     * ③curate 面按「登记了却没表态」把它的工具藏起来。见 [isServiceReady] 的两个使用点。
+     */
+    private val serviceReady = ConcurrentHashMap.newKeySet<String>()
+
+    /** 该插件此刻能不能接住一次 dispatch（service WebView 存在**且**已加载完）。 */
+    fun isServiceReady(pluginId: String): Boolean =
+        serviceViews.containsKey(pluginId) && serviceReady.contains(pluginId)
     private val panelViews = ConcurrentHashMap<String, Held>()
     private val settingsViews = ConcurrentHashMap<String, Held>()
     /** 消息卡片 WebView，键 "<pluginId>#<cardKey>"（cardKey = 消息 id）。 */
@@ -133,7 +148,11 @@ object PluginRuntime {
             // loadUrl + shouldInterceptRequest 路径，由拦截器合成 service 引导页（已验证可靠）。
             configureCommon(
                 wv, rec.manifest, rec.dir,
-                onFirstReady = { emit(rec.manifest.id, "enable", null) },
+                onFirstReady = {
+                    // service.js 已加载完，从这一刻起 __ggufDispatch 才接得住调用（见 serviceReady）。
+                    serviceReady.add(rec.manifest.id)
+                    emit(rec.manifest.id, "enable", null)
+                },
             )
             val bridge = PluginBridge(rec.manifest.id, WebViewKind.SERVICE, appContext, wv)
             wv.addJavascriptInterface(bridge, "__ggufHost")
@@ -144,6 +163,7 @@ object PluginRuntime {
     }
 
     private fun destroyService(id: String) {
+        serviceReady.remove(id)
         for (call in pending.values) {
             if (call.pluginId == id) call.deferred.completeExceptionally(PluginUnavailable())
         }
@@ -183,6 +203,12 @@ object PluginRuntime {
      */
     suspend fun dispatch(pluginId: String, hook: String, payload: JSONObject, budgetMs: Long): JSONObject? {
         val held = serviceViews[pluginId] ?: return null
+        // service.js 还没加载完：这次调用注定没人接。立刻当「本轮无返回」返回，**且不记熔断**——
+        // 「没准备好」不是「坏了」（熔断状态落盘，冷启期连发几条就能把好插件永久旁路）。
+        if (!serviceReady.contains(pluginId)) {
+            android.util.Log.d("GGUF-gw", "dispatch $pluginId/$hook 跳过：service 尚未就绪（不计熔断）")
+            return null
+        }
         val callId = callIdSeq.incrementAndGet()
         val deferred = CompletableDeferred<JSONObject>()
         pending[callId] = PendingCall(pluginId, deferred)

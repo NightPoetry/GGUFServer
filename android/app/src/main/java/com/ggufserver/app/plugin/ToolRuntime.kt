@@ -9,9 +9,14 @@ import org.json.JSONObject
  * type → 运行时插件」这一条注册关系；**加一种能力类型 = 加一个 CapabilityRuntime，内核不改**。
  *
  * 运行时插件可以是原生（内置，如本文件的 [ToolRuntime]）也可以是 JS（用户上传）；内核对二者一视同仁。
- * 当前接口只含 curate/context 都需要的统一触点（[callablesIn] + [teachingClause]）；stream/after 触点
- * 眼下由具体 runtime 各自以专用方法暴露（如 [ToolRuntime.makeScanner]/[ToolRuntime.execute]）——等第二种
- * runtime（skill）落地、有了两个样例后再把 stream/after 上提到接口，避免只有一个样例时抽错抽象。
+ * 当前接口只含 curate/context 都需要的统一触点（[callablesIn] + [callableNamesOf] + [teachingClause]）；
+ * stream/after 触点由具体 runtime 各自以专用方法暴露（如 [ToolRuntime.makeScanner]/[ToolRuntime.execute]）。
+ *
+ * **这个形状已被三个真样例验证，别再动它**（2026-07-26，桌面端「小模型轮椅」反哺，见规范 §13.5 末）：
+ * 那边有真的技能引擎与真的工作流引擎，tool/skill/workflow 三个 runtime 做下来，共同触点仍然只有
+ * 上面这三个；stream/after **不该**上提——三者的执行面天然分叉（tool 走分发、skill 走注入指令、
+ * workflow 走协调器状态机），硬上提只会造出一个谁都不合身的形状。原先「只有一个样例怕抽错抽象」
+ * 的顾虑到此作废，阶段 4 只剩「写引擎」。
  */
 interface CapabilityRuntime {
     val type: String

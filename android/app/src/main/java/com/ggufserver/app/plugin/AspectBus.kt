@@ -68,12 +68,28 @@ class AspectRegistry(
     hasNativeTools: Boolean,
     /** 受限解码请求（json_schema/grammar）跳过 params 面：参数由调用方定型（§6.10 判定保护）。 */
     constrained: Boolean,
+    /** 该插件的 service WebView 此刻是否**已就绪**（能接住一次 dispatch）。默认全就绪：
+     *  单测与无宿主环境不关心冷启。见 [curate] / [curateAbstained] 对「没准备好 ≠ 坏了」的处理。 */
+    ready: (PluginManifest) -> Boolean = { true },
 ) {
     val route: List<PluginManifest> = active.filter { "route" in it.hooks }
-    val curate: List<PluginManifest> = active.filter { "curate" in it.hooks }
 
-    /** curate 面的**弃权者**：没登记 curate 处理器的插件。它们的 callable 享有豁免（§13.4），见 [AspectBus.curateExposure]。 */
-    val curateAbstained: List<PluginManifest> = active.filter { "curate" !in it.hooks }
+    /** curate 面的**登记者**（静态，只看 manifest hooks）。**教学注入位只能看它**——位置若随
+     *  「本轮谁在线」变，首条 system 的字节就会逐轮抖动（§10 红线 5，见 Gateway.applySystemSuffix）。 */
+    val curateRegistered: List<PluginManifest> = active.filter { "curate" in it.hooks }
+
+    /** 本轮真正去分发的 curate 处理器：登记了**且此刻就绪**。 */
+    val curate: List<PluginManifest> = curateRegistered.filter(ready)
+
+    /**
+     * curate 面的**弃权者**：其 callable 无条件并入暴露集（§13.4 纪律 2），见 [AspectBus.curateExposure]。
+     *
+     * 两类人：①没登记 curate 的（原语义）；②**登记了但此刻 service WebView 还没就绪的**（App 冷启
+     * 头几秒）。第二类是 2026-07-27 补的：纪律 3「登记了却没表态 ≠ 弃权」的理由是「插件坏了它的
+     * `tool` 钩子同样跑不了，教了也是白教」——这条推理**对没准备好的插件不成立**：等模型几秒后
+     * 吐出标记时它早就绪了，`tool` 钩子跑得动，凭什么这一轮把它的工具藏起来。
+     */
+    val curateAbstained: List<PluginManifest> = active.filter { p -> curate.none { it.id == p.id } }
     val context: List<PluginManifest> = active.filter { "context" in it.hooks }
     val params: List<PluginManifest> = if (constrained) emptyList() else active.filter { "params" in it.hooks }
     val afterReply: List<PluginManifest> = active.filter { "afterReply" in it.hooks }

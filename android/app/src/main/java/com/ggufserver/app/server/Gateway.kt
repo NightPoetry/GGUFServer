@@ -248,7 +248,7 @@ class Gateway(
     ): Plan {
         // 切面微内核（§13）：把启用插件投影成「每个管线面挂了谁」，再按管线面顺序经 AspectBus 分发。
         // 阶段 1 等价重构——顺序/预算/fail-open 与旧内联流水线逐字节一致，仅收敛了编排。
-        val reg = AspectRegistry(active, hasNativeTools, constrained)
+        val reg = AspectRegistry(active, hasNativeTools, constrained) { PluginRuntime.isServiceReady(it.id) }
         val isStream = root.optBoolean("stream", false)
 
         // ---- route 面：串行、可接管，总预算 150ms（红线：request 路径同步点之一） ----
@@ -275,7 +275,9 @@ class Gateway(
         applyContext(msgList, results, anyCrossDay)
 
         // ---- context 面（教学部分）：systemClause + 各运行时插件按 curate 的 exposure 生成的 callable 教学，逐轮字节稳定 ----
-        applySystemSuffix(msgList, active, hasNativeTools, exposure)
+        // 注入位判据用 curateRegistered（静态登记）而非 curate（本轮就绪者）：位置只能随「用户开关
+        // 插件」变，不能随「本轮谁在线」变，否则冷启那几轮 head 会抖（§10 红线 5）。
+        applySystemSuffix(msgList, active, hasNativeTools, exposure, reg.curateRegistered.isNotEmpty())
         root.put("messages", toJsonArray(msgList))
 
         // ---- params 面：按任务自适应采样参数（§6.10）。必须在 context/systemClause 之后——
@@ -447,9 +449,11 @@ class Gateway(
     }
 
     /** systemClause + 各运行时插件的 callable 教学条款（curate/context 面），追加到首条 system 末尾（§6.5/§6.9/§13.5）。
-     *  [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）。 */
+     *  [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）。
+     *  [curateRegistered]＝本次请求的启用插件里有没有人在 curate 面登记（决定教学**注入位**，见下）。 */
     private fun applySystemSuffix(
-        msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean, exposure: Set<String>?,
+        msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean,
+        exposure: Set<String>?, curateRegistered: Boolean,
     ) {
         val sb = StringBuilder()
         for (p in active) {
@@ -463,15 +467,20 @@ class Gateway(
         val teaching = if (hasNativeTools) emptyList() else Runtimes.all.mapNotNull { rt ->
             rt.teachingClause(rt.callablesIn(active), exposure)
         }
-        // 注入位置由「curate 有没有表态」决定，这是 KV 前缀缓存红线（§3 血泪教训的直接推论）：
-        // - exposure == null（默认，没有插件登记 curate）：教学条款逐轮完全一样 → 照旧拼进首条
-        //   system，逐字节等价 v1，前缀缓存全命中。
-        // - exposure != null：教学条款随本轮意图变（闲聊轮不露、记事轮露）。这种动态内容一旦拼进
+        // 注入位置由「有没有插件**登记** curate」决定，这是 KV 前缀缓存红线（§3 血泪教训的直接推论）：
+        // - 没人登记 curate：教学条款逐轮完全一样 → 照旧拼进首条 system，逐字节等价 v1，前缀缓存全命中。
+        // - 有人登记 curate：教学条款随本轮意图变（闲聊轮不露、记事轮露）。这种动态内容一旦拼进
         //   首条 system，整条 prompt 从第一个 token 就变了 → 每次意图切换都要在手机 CPU 上重算
-        //   整段 prefill（秒级），省下的 150 token 远不够抵。所以改插到「末条用户消息之前」的
-        //   动态位（与 tail 同一位置纪律）：历史 KV 全保住，只重算末尾一小段。顺带也符合实测排布
-        //   结论——任务指令紧贴问题比压在最前面更容易被 1B 真正执行。
-        if (exposure == null) {
+        //   整段 prefill（秒级，实测 1.9s/169token），省下的 150 token 远不够抵。所以改插到
+        //   「末条用户消息之前」的动态位（与 tail 同一位置纪律）：历史 KV 全保住，只重算末尾一小段。
+        //   顺带也符合实测排布结论——任务指令紧贴问题比压在最前面更容易被 1B 真正执行。
+        //
+        // 判据是「登记」而不是「本轮 exposure 是否为 null」（2026-07-27 修）：后者是**逐轮可变的
+        // 运行结果**——登记了的处理器全超时/全异常的那一轮 exposure 会退回 null，若据此把教学挪回
+        // head，head 的字节就随 curate 的成败逐轮抖动，正是 §10 红线 5 禁止的事，代价是那一轮连同
+        // 下一轮各重算一次整段 prefill。改用「登记」后：位置只随启用插件集变（用户开关插件时才动），
+        // 失败轮退化成「在动态位全露」——内容与原先一致，但 head 恒定、历史 KV 不受牵连。
+        if (!curateRegistered) {
             for (c in teaching) {
                 if (sb.isNotEmpty()) sb.append("\n\n")
                 sb.append(c)
@@ -488,7 +497,7 @@ class Gateway(
                 msgList.add(0, JSONObject().put("role", "system").put("content", suffix))
             }
         }
-        if (exposure != null && teaching.isNotEmpty()) {
+        if (curateRegistered && teaching.isNotEmpty()) {
             val block = teaching.joinToString("\n\n").trimEnd()
             val insertIdx = msgList.indexOfLast { it.optString("role") == "user" }
             val m = JSONObject().put("role", "system").put("content", block)

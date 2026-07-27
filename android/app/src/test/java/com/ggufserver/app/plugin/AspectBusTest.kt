@@ -165,6 +165,42 @@ class AspectBusTest {
         assertEquals(setOf("third.run"), e)   // a 自己收了，但不许替 third 做决定
     }
 
+    // ---------- 「没准备好」≠「坏了」：service WebView 冷启窗口（2026-07-27） ----------
+
+    @Test
+    fun `登记了 curate 但 service 未就绪时 按弃权处理 工具不该被藏起来`() {
+        val notes = manifest("notes", hooks = listOf("curate"), tools = listOf("notes.append"))
+        val tts = manifest("tts", hooks = listOf("curate"), tools = listOf("tts.say"))
+        val active = listOf(notes, tts)
+
+        // tts 的 service.js 还没加载完（App 冷启头几秒）
+        val reg = AspectRegistry(active, hasNativeTools = false, constrained = false) { it.id == notes.id }
+
+        assertEquals("只分发给就绪的处理器", listOf(notes.id), reg.curate.map { it.id })
+        assertTrue("未就绪者进弃权集：等模型吐标记时它早就绪了，tool 钩子跑得动", reg.curateAbstained.any { it.id == tts.id })
+
+        val e = runBlocking {
+            AspectBus.curateExposure(reg.curate, reg.curateAbstained, 1_000) { _, _ ->
+                JSONObject().put("expose", JSONArray())      // notes 表态「我这边啥都别露」
+            }
+        }
+        assertEquals("tts 冷启中不该被 notes 的收窄连累掉工具", setOf("tts.say"), e)
+    }
+
+    @Test
+    fun `教学注入位的判据是登记 不随本轮谁在线变`() {
+        val notes = manifest("notes", hooks = listOf("curate"), tools = listOf("notes.append"))
+        val active = listOf(notes)
+
+        val cold = AspectRegistry(active, hasNativeTools = false, constrained = false) { false }
+        val warm = AspectRegistry(active, hasNativeTools = false, constrained = false) { true }
+
+        // 位置只能看 curateRegistered：它俩必须一致，否则 head 的字节会随冷热抖动（§10 红线 5）
+        assertEquals(1, cold.curateRegistered.size)
+        assertEquals(cold.curateRegistered.size, warm.curateRegistered.size)
+        assertTrue("冷启轮没有可分发的处理器，但登记事实不变", cold.curate.isEmpty() && warm.curate.isNotEmpty())
+    }
+
     // ---------- 收窄真的落到教学条款上 ----------
 
     @Test
