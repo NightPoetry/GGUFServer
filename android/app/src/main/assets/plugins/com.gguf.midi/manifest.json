@@ -1,0 +1,36 @@
+{
+  "id": "com.gguf.midi",
+  "name": "乐句",
+  "version": "1.2.4",
+  "apiVersion": 1,
+  "description": "让模型作曲：可点情绪（悲伤/欢快/安静…，乐理由插件把住），说「再来一段」就同调同速地接着长——片段+编排、多轨乐器、端上合成，完全离线",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.42,
+    "topbar": true
+  },
+  "permissions": [
+    "llm",
+    "chat:route",
+    "chat:annotate",
+    "chat:card",
+    "chat:context"
+  ],
+  "hooks": [
+    "route",
+    "handle",
+    "curate",
+    "tool"
+  ],
+  "tools": [
+    {
+      "name": "midi.play",
+      "description": "把标签体里的编排脚本变成一条可播放的乐句消息。写法：第一行 tempo:100 key:Am；然后用 pat A: 与 pat B: 各定义一个片段（音名 C4 E4 G4 或简谱 1 2 3，一个音占一个八分拍，- 延长，0 休止，| 分小节）；最后 play: A A B A+12 A*2 给播放顺序（+n/-n 移调半音、*n 重复，靠它把 4 小节排成几十小节）。可选 inst: melody=piano（还可选 bell/pluck/strings）与 mix: melody=0.9 bass=0.5。低音与和声由插件按调式自动配，不要自己写。仅当用户要求作曲/旋律/音乐时使用",
+      "input": "text"
+    }
+  ]
+}

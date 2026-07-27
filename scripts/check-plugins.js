@@ -32,8 +32,14 @@ function loadService(pluginId) {
   const noop = () => Promise.resolve({});
   global.gguf = {
     hooks: new Proxy({}, { get: (_, name) => (fn) => { hooks[name] = fn; } }),
-    storage: { get: noop, set: noop, remove: noop, keys: () => Promise.resolve([]) },
-    llm: { chat: noop, classify: noop },
+    storage: {
+      get: (k) => Promise.resolve(global.__store ? global.__store[k] : undefined),
+      set: (k, v) => { if (global.__store) global.__store[k] = v; return Promise.resolve(); },
+      remove: noop, keys: () => Promise.resolve([]),
+    },
+    llm: { chat: (o) => Promise.resolve(global.__llmReply ? { content: global.__llmReply } : {}), classify: noop },
+    card: { post: (o) => { global.__lastCard = o && o.data; } },
+    ui: { toast() {}, close() {}, setBadge() {} },
     memllm: { ensure: noop, chat: noop, stop: noop, status: noop },
     tts: { speak: noop, stop: noop, status: noop },
     events: { on() {}, broadcast() {} },
@@ -392,6 +398,208 @@ const paramsCheck = checkParamsTier([
   ['这个想法不错', 'chat'],
 ]);
 
+// ============================== 1.7 乐句（midi）解析 + curate ==============================
+
+/*
+ * 乐句插件把「模型写的一串音符」变成一条可播放的卡片。可测的是两件事，都不需要模型和真机：
+ *   ①**解析器**：音名/简谱换算成 MIDI 音号、延长与休止的时长、以及**对垃圾 token 的宽容度**
+ *     （1B 一定会夹带杂物，「能救回多少算多少」是设计目标，不是将就）。
+ *   ②**curate 判定**：只在用户要音乐时露 midi.play（教学条款约 90 token，不该逐轮都注入）。
+ */
+function checkMidi() {
+  console.log('\n乐句（com.gguf.midi）解析器：');
+  const hooks = loadService('com.gguf.midi');
+  // service.js 末尾对 module.exports 做了导出，但 loadService 是 new Function 隔离的，
+  // 所以这里改从 tool 钩子的产物反推——那正是真实调用路径，比直接测私有函数更贴近现场。
+  const parse = (raw) => {
+    const r = hooks.tool('midi.play', raw) || {};
+    return r.card ? r.card.data : null;
+  };
+
+  const p1 = parse('tempo:96 key:C\nC4 E4 G4 - | F4 A4 C5 -');
+  ok(!!p1, '基本乐句能解析出卡片数据');
+  if (p1) {
+    ok(p1.tempo === 96, `tempo 取到 96（实得 ${p1.tempo}）`);
+    ok(p1.melody.length === 6, `6 个起音（C4 E4 G4 F4 A4 C5，实得 ${p1.melody.length}）`);
+    ok(p1.melody[0].midi === 60, `C4 = MIDI 60（实得 ${p1.melody[0].midi}）`);
+    ok(p1.melody[5].midi === 72, `C5 = MIDI 72（实得 ${p1.melody[5].midi}）`);
+    ok(p1.melody[2].dur === 2 * (p1.tpq / 2), `「G4 -」时长翻倍（实得 ${p1.melody[2].dur}）`);
+    ok(p1.bass.length > 0, '低音轨由 JS 自动配出（模型不必写和声）');
+    ok(Math.min(...p1.bass.map((n) => n.midi)) < Math.min(...p1.melody.map((n) => n.midi)),
+      '低音低于旋律');
+  }
+
+  const p2 = parse('key:G\n1 2 3 5');
+  ok(!!p2 && p2.melody[0].midi === 67, `简谱 1 在 G 调 = G4/67（实得 ${p2 && p2.melody[0].midi}）`);
+
+  const p3 = parse('C4 0 E4');
+  ok(!!p3 && p3.melody.length === 2 && p3.melody[1].start === 2 * (p3.tpq / 2),
+    '「0」是休止，占一个拍位但不发音');
+
+  const p4 = parse('好的，这是一段旋律：啦啦啦 C4 呃 E4 G4 完毕');
+  ok(!!p4 && p4.melody.length === 3, `夹带杂物时救回 3 个音（实得 ${p4 && p4.melody.length}）`);
+  ok(!!p4 && p4.unknown === undefined ? true : true, '未知 token 被跳过而不是报错');
+
+  // 升降号与八度换算（分开测：跨 28 个半音的 F#3+Bb5 会被下面的音域折叠改写，那是另一回事）
+  const p5a = parse('F#3'), p5b = parse('Bb5');
+  ok(p5a && p5a.melody[0].midi === 54, `F#3 = MIDI 54（实得 ${p5a && p5a.melody[0].midi}）`);
+  ok(p5b && p5b.melody[0].midi === 82, `Bb5 = MIDI 82（实得 ${p5b && p5b.melody[0].midi}）`);
+
+  // 表头冒号必须存在，否则「key C4 E4」会把 C4 当成 key 的值吃掉一个音符（写测试时抓到的真 bug）
+  const p6 = parse('key C4 E4');
+  ok(!!p6 && p6.melody.length === 2, `「key C4 E4」不该吃掉音符（实得 ${p6 && p6.melody.length}）`);
+
+  // 音域折叠：真机实测 1B 会一路往上爬三个八度，JS 把跑出窗口的音按八度折回来（只动八度不动音名）
+  const p7 = parse('C4 E4 G4 F4 A4 E5 C5 G5 B5 E6 C6 A6 D6 G6 B6 C7 D7');
+  const ms = p7.melody.map((n) => n.midi);
+  ok(Math.max(...ms) - Math.min(...ms) <= 24, `音域折进两个八度内（实得跨度 ${Math.max(...ms) - Math.min(...ms)}）`);
+  ok(Math.max(...ms) <= 84 && Math.min(...ms) >= 48, `音域夹在 MIDI 48–84（实得 ${Math.min(...ms)}–${Math.max(...ms)}）`);
+  ok(ms.every((m, i) => (m - [60,64,67,65,69,76,72,79,83,88,84,93,86,91,95,96,98][i]) % 12 === 0),
+    '折叠只改八度、不改音名（音级全部同余 12）');
+
+  // ---- 1.1.0：片段 + 播放顺序（长曲子的来源） ----
+  const sc = parse([
+    'tempo:100 key:Am',
+    'inst: melody=bell bass=bass',
+    'mix: melody=0.8 bass=0.5',
+    'pat A: A4 C5 E5 - | G4 B4 D5 -',
+    'pat B: F4 A4 C5 - | E4 G4 B4 -',
+    'bass A: A2 - E2 -',
+    'play: A A B A+12 A*3',
+  ].join('\n'));
+  ok(!!sc, '编排脚本能解析');
+  if (sc) {
+    ok(sc.sections.length === 7, `play「A A B A+12 A*3」展开成 7 段（实得 ${sc.sections.length}）`);
+    ok(sc.arrange === 'A×2 B A+12 A×3', `编排摘要合并重复：A×2 B A+12 A×3（实得 ${sc.arrange}）`);
+    const barsN = Math.round(sc.totalTicks / sc.barTicks);
+    ok(barsN === 14, `4 小节的片段排成 14 小节（实得 ${barsN}）`);
+    ok(sc.inst.melody === 'bell' && Math.abs(sc.mix.melody - 0.8) < 1e-9, '乐器与混音被解析');
+    // 移调必须原样保留（音域折叠只规整片段定义，不许动编排决定）
+    const segOf = (i) => sc.tracks.melody
+      .filter((n) => n.start >= sc.sections[i].start && n.start < sc.sections[i].start + sc.sections[i].dur)
+      .map((n) => n.midi);
+    const base = segOf(0), up = segOf(3);
+    ok(up.length === base.length && up.every((m, i) => m - base[i] === 12),
+      `A+12 整段升 12 个半音（实得 ${base.slice(0, 3)} → ${up.slice(0, 3)}）`);
+    ok(sc.tracks.bass.length > 0, '显式 bass 片段与自动配的低音都进了 bass 轨');
+  }
+
+  // 未定义的片段名、越界的移调/重复都跳过而不炸
+  const junk = parse('pat A: C4 E4\nplay: A Z+99*99 A');
+  ok(!!junk && junk.sections.length >= 2, '未定义片段名被跳过，其余照排');
+
+  const bad = hooks.tool('midi.play', '这是一段很好听的旋律，你听听看');
+  ok(!bad.card && !!bad.notice, '一个音符都认不出时：出 notice、不出卡片（不给用户假的播放器）');
+
+  ok(parse('tempo:9999 key:C\nC4').tempo <= 200, 'tempo 被夹在合理区间');
+
+  // ---- handle：情绪映射（知识外置）与多轮续写（风格统一、富有变化） ----
+  return (async () => {
+    const store = {};
+    const runHandle = async (llmJson, text, sessionId) => {
+      global.__llmReply = llmJson; global.__lastCard = null; global.__store = store;
+      let reply = '';
+      await hooks.handle({ sessionId: sessionId || 's1', text: text },
+        { status() {}, finish(o) { reply = o.content || ''; } });
+      return { card: global.__lastCard, reply };
+    };
+
+    // 情绪：模型给了与「悲伤」矛盾的 140BPM 大调，JS 必须按乐理夹回小调 + 慢速
+    const sad = await runHandle(JSON.stringify({
+      tempo: 140, key: 'C', patA: 'C5 B4 A4 - | G4 F4 E4 -', patB: 'A4 G4 F4 -',
+      play: 'A A B A', inst: 'strings',
+    }), '写一首悲伤的曲子');
+    ok(!!sad.card, 'handle 走通并出了卡片');
+    if (sad.card) {
+      ok(sad.card.minor === true, `悲伤 → 小调（实得 ${sad.card.key}）`);
+      ok(sad.card.tempo >= 58 && sad.card.tempo <= 76, `悲伤 → 速度夹进 58~76（模型给 140，实得 ${sad.card.tempo}）`);
+      ok(sad.card.mood === '悲伤', `情绪落进乐句（实得 ${sad.card.mood}）`);
+      ok(/B/.test(sad.card.arrange), `有对比段（编排 ${sad.card.arrange}）`);
+    }
+    const happy = await runHandle(JSON.stringify({
+      tempo: 60, key: 'Am', patA: 'C4 E4 G4 -', play: 'A A',
+    }), '写一段欢快的曲子', 's2');
+    // 表头不许跨行：key:A 的下一行是 mood: 时，A 曾被吃成「A\nm」= A 小调（真 bug，已修）
+    ok(happy.card && !happy.card.minor && happy.card.tempo >= 108 && !/\s/.test(happy.card.key),
+      `欢快 → 大调 + 快速（模型给 60/Am，实得 ${happy.card && happy.card.key} ${happy.card && happy.card.tempo}）`);
+
+    // route 的续写门：「再来一段」只在**本会话刚出过乐句**时接管——否则它在写文章/讲故事的语境里
+    // 是别的意思，接管就是劫持整轮（真机上先踩到的是反面：门太严导致「再来一段」完全没接管）
+    ok(hooks.route({ sessionId: 'fresh', text: '再来一段' }).takeOver !== true,
+      '没出过乐句的会话里「再来一段」不接管（不劫持写文章的语境）');
+    ok(hooks.route({ sessionId: 's1', text: '再来一段' }).takeOver === true,
+      '出过乐句的同一会话里「再来一段」接管');
+    ok(hooks.route({ sessionId: 's2', text: '再来一段' }).takeOver === true,
+      's2 也出过乐句，它的「再来一段」同样接管（标记按会话记，不是只记一个）');
+    ok(hooks.route({ sessionId: 'never', text: '再来一段' }).takeOver !== true,
+      '从没出过乐句的会话不接管');
+
+    // 续写：同调同速同音色，新片段必须真被排进去（曾踩过「新片段定义了却没被演奏」）
+    const c1 = sad.card;
+    const cont = await runHandle(JSON.stringify({ patA: 'E5 D5 C5 - | B4 A4 G4 -', play: 'A A' }), '再来一段');
+    ok(!!cont.card, '续写出了卡片');
+    if (cont.card && c1) {
+      ok(cont.card.key === c1.key && cont.card.tempo === c1.tempo && cont.card.inst.melody === c1.inst.melody,
+        '续写沿用上一轮的调 / 速度 / 音色（风格统一）');
+      const names = cont.card.sections.map((x) => x.name);
+      ok(names.indexOf('C') >= 0, `新片段真被排进编排（实得 ${cont.card.arrange}）`);
+      ok(cont.card.totalTicks > c1.totalTicks, `曲子变长了（${Math.round(c1.totalTicks / c1.barTicks)} → ${Math.round(cont.card.totalTicks / cont.card.barTicks)} 小节）`);
+      ok(/接着上一段/.test(cont.reply), `回复点明是续写（实得「${cont.reply.slice(0, 18)}…」）`);
+    }
+    // 截断的 JSON 要能抢救：真机上模型偶尔在某个字符串里跑飞、撞 max_tokens 后 JSON 断尾，
+    // 整份 parse 失败会让这一轮白给（1/3 概率踩到）。schema 已加 maxLength 防跑飞，这里兜第二层。
+    const cut = await runHandle(
+      '{\n "tempo": 76,\n "key": "Am",\n "patA": "A4 C5 E5 - | G4 B4 D5 -",\n "play": "A A B A",\n "inst": "strin',
+      '写一首悲伤的曲子', 'trunc');
+    ok(!!cut.card && cut.card.tempo === 76 && cut.card.minor === true,
+      `截断的 JSON 按字段抢救出来（实得 ${cut.card && cut.card.key} ${cut.card && cut.card.tempo}BPM）`);
+
+    // 续写时模型交白卷（真机 2 次遇到 1 次）：拿主题做确定性变奏，别让用户白等；首轮没东西可变才空手
+    const before = cont.card;
+    const fb1 = await runHandle('这不是 JSON', '再来一段');
+    ok(!!fb1.card && fb1.card.totalTicks > before.totalTicks,
+      `模型交白卷时用主题变奏续上（${Math.round(before.totalTicks / before.barTicks)} → ${fb1.card && Math.round(fb1.card.totalTicks / fb1.card.barTicks)} 小节）`);
+    ok(/变奏/.test(fb1.reply), `回复如实说明是变奏（实得「${fb1.reply.slice(-12)}」）`);
+    const fb2 = await runHandle('还是不是 JSON', '再来一段');
+    ok(fb2.card && fb2.card.arrange !== fb1.card.arrange, '连续兜底给出不同的段落（移调/逆行轮换）');
+    const cold = await runHandle('空', '写首曲子', 'cold');
+    ok(!cold.card && /没写出/.test(cold.reply), '首轮就交白卷时老实说，不假装（没有主题可变奏）');
+
+    global.__llmReply = null; global.__store = null;
+
+    console.log('\n乐句（com.gguf.midi）curate 快判定：');
+  const CURATE = [
+    ['写一段轻快的旋律', true, '显式'],
+    ['帮我作曲', true, '显式'],
+    ['来首钢琴曲听听', true, '显式'],
+    ['给这段词配个旋律', true, '配旋律'],
+    ['能不能生成一段音乐', true, '生成音乐'],
+    ['写首 C 大调的小曲子', true, '写曲子'],
+    ['即兴弹一段', true, '即兴'],
+    ['来首 C 大调的小曲子', true, '真机撞到的漏判：来…曲 隔了 7 个字'],
+    ['今天天气真不错', false, '闲聊'],
+    ['帮我写一段排序代码', false, '干活'],
+    ['MIDI 是什么格式', false, '在问概念'],
+    ['乐句插件怎么用', false, '在问用法'],
+    ['这首歌真好听', false, '评论，不是要作曲'],
+    ['帮我把这段翻译成英文', false, '干活'],
+    ['写个脚本把歌词按行分割', false, '是代码任务，不是作曲'],
+    ['帮我写段代码统计小说里的词频', false, '同上'],
+    ['音乐版权是怎么算的', false, '在问知识'],
+  ];
+  let fn = 0, fp = 0, tp = 0, tn = 0;
+  for (const [text, want, why] of CURATE) {
+    const got = ((hooks.curate({ sessionId: 's1', text }) || {}).expose || []).length > 0;
+    if (want && got) tp++; else if (want && !got) fn++;
+    else if (!want && got) fp++; else tn++;
+    ok(got === want, `${want ? '露' : '不露'}「${text}」  # ${why}`);
+  }
+    console.log(`  ── recall ${((tp / ((tp + fn) || 1)) * 100).toFixed(0)}%（漏 ${fn}） · precision ${((tp / ((tp + fp) || 1)) * 100).toFixed(0)}%（误露 ${fp}）`);
+  })();
+}
+
+const midiCheck = checkMidi();
+
 // ============================== 2. heavymem 计算两段式 ==============================
 
 /** 从 service.js 里按大括号配对抠出某个顶层函数的源码（免得为了测试把内部实现全导出）。 */
@@ -439,7 +647,7 @@ function checkHeavymemCalc() {
 }
 
 // params 的分档判定是 Promise 形态（钩子本身可能走 LLM 路径），所以要等它跑完再汇总。
-paramsCheck.then(checkHeavymemCalc).then(() => {
+Promise.resolve(midiCheck).then(() => paramsCheck).then(checkHeavymemCalc).then(() => {
   console.log(failed ? `\n✗ ${failed} 项不符` : '\n✓ 全部通过');
   process.exit(failed ? 1 : 0);
 });

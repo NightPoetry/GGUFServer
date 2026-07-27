@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>乐句</title>
+<style>
+  /* 面板样式与朗读插件（com.gguf.tts/ui.html）同构：同一套 --gg-* 变量、同样的卡片/开关/按钮 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .card { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 10px; background: var(--gg-card, #fff); padding: 10px 12px; }
+  .card p { margin: 4px 0; }
+  .muted { color: var(--gg-muted, #6B6557); font-size: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+         background: color-mix(in srgb, var(--gg-fg, #2D2A26) 6%, transparent);
+         padding: 1px 5px; border-radius: 4px; }
+  button {
+    padding: 6px 12px; border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 8px; background: var(--gg-card, #fff); color: var(--gg-accent, #C96442);
+    font: inherit; font-size: 12.5px; flex: none;
+  }
+  button:active { opacity: .6; }
+  .item { border-top: 1px solid var(--gg-line, #E7E3D8); padding: 9px 0 8px; }
+  .item:first-child { border-top: 0; padding-top: 2px; }
+  .item .t { font-size: 12.5px; }
+  .item .s { font-size: 11.5px; color: var(--gg-muted, #6B6557); margin-top: 1px;
+             font-family: ui-monospace, Menlo, monospace;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .knob { position: absolute; inset: 0; border-radius: 22px; cursor: pointer;
+          background: var(--gg-line, #E7E3D8); transition: background .15s; }
+  .knob::before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+                  border-radius: 50%; background: #fff; transition: transform .15s;
+                  box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  input:checked + .knob { background: var(--gg-accent, #C96442); }
+  input:checked + .knob::before { transform: translateX(18px); }
+</style>
+</head>
+<body>
+  <h3>用法</h3>
+  <div class="card">
+    <p>让模型作曲即可，比如「写一段轻快的旋律」「来首 C 大调的小曲子」。</p>
+    <p class="muted">出来是一条可播放的乐句卡片：点按播放/停止，长按看音符。声音是<b>端上合成</b>的
+      （Web Audio 振荡器 + 包络），完全离线、不联网、不下载音源。</p>
+    <p class="muted" style="margin-top:6px"><b>可以点菜</b>：说「写一首<b>悲伤</b>的曲子」「来段<b>欢快</b>的」
+      「<b>安静</b>一点的睡前曲」——情绪对应的调式、速度、音色由插件按乐理定（悲伤＝小调 + 慢 + 弦乐），
+      模型只管旋律，所以不会出现「说悲伤却给了 140 BPM 大调」。</p>
+    <p class="muted" style="margin-top:6px"><b>长曲子靠多写几轮</b>：写完一段后说「<b>再来一段</b>」
+      「接着写」，新的一段会<b>沿用同一个调、速度、音色</b>（风格统一），但换走向或换音区（富有变化），
+      并接在已有编排后面、末尾回一次主题。每轮都能听到完整的、更长的曲子。
+      模型偶尔交白卷时，插件会拿主题做个变奏（移调/逆行）接上，并在回复里说明。</p>
+    <p class="muted" style="margin-top:6px">记谱是「片段 + 播放顺序」，模型只写片段，几十小节由插件展开：</p>
+    <p class="muted" style="margin-top:4px">
+      <code>tempo:100 key:Am</code><br>
+      <code>pat A: A4 C5 E5 - | G4 B4 D5 -</code><br>
+      <code>pat B: F4 A4 C5 - | E4 G4 B4 -</code><br>
+      <code>play: A A B A+12 A*2</code></p>
+    <p class="muted" style="margin-top:4px">
+      <code>+12</code>／<code>-5</code> = 整段移调（半音），<code>*2</code> = 重复；
+      <code>-</code> 延长、<code>0</code> 休止、<code>|</code> 小节线；音名与简谱都认。<br>
+      可选 <code>inst: melody=piano</code>（还有 bell / pluck / strings）与
+      <code>mix: melody=0.9 bass=0.5</code>；<b>低音与和声由插件按调式自动配</b>，模型不用管。</p>
+  </div>
+
+  <h3>设置</h3>
+  <div class="card">
+    <div class="row">
+      <span>新卡片自动播放</span>
+      <label class="switch"><input type="checkbox" id="swAuto"><span class="knob"></span></label>
+    </div>
+  </div>
+
+  <h3>最近的乐句</h3>
+  <div class="card" id="list"><p class="muted">还没有。让模型写一段试试。</p></div>
+
+<script>
+(function () {
+  'use strict';
+  var listEl = document.getElementById('list');
+  var sw = document.getElementById('swAuto');
+
+  gguf.storage.get('autoplay').then(function (v) { sw.checked = v !== false; })
+    .catch(function () { sw.checked = true; });
+  sw.addEventListener('change', function () { gguf.storage.set('autoplay', sw.checked); });
+
+  function fmt(ts) {
+    var d = new Date(ts);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function render(list) {
+    if (!list || !list.length) {
+      listEl.innerHTML = '<p class="muted">还没有。让模型写一段试试。</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    list.forEach(function (p) {
+      var wrap = document.createElement('div');
+      wrap.className = 'item';
+      var row = document.createElement('div');
+      row.className = 'row';
+      var left = document.createElement('div');
+      left.style.minWidth = '0';
+      var t = document.createElement('div');
+      t.className = 't';
+      var secs = p.totalTicks && p.tpq ? (p.totalTicks / p.tpq) * (60 / p.tempo) : 0;
+      var dur = secs ? ' · ' + Math.floor(secs / 60) + ':' + (Math.round(secs % 60) < 10 ? '0' : '') + Math.round(secs % 60) : '';
+      t.textContent = (p.key || 'C') + (p.minor ? ' 小调' : ' 大调') + ' · ' + p.tempo + ' BPM' + dur
+        + (p.arrange ? ' · ' + p.arrange : '') + ' · ' + fmt(p.ts);
+      var s = document.createElement('div');
+      s.className = 's';
+      // 只显示音符那一行（text 的第二行），第一行是概要
+      s.textContent = String(p.text || '').split('\n').slice(1).join(' ') || '—';   // 首行是概要
+      left.appendChild(t); left.appendChild(s);
+      var btn = document.createElement('button');
+      btn.textContent = '重发到对话';
+      btn.addEventListener('click', function () {
+        // 明确的用户动作，所以插一条新卡片消息是预期行为（不是后台偷偷插内容）
+        // 整份原样带上（多轨/乐器/混音/编排都要），只把 postedAt 换成现在——卡片靠它判断"新鲜"
+        var data = {};
+        for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) data[k] = p[k];
+        data.postedAt = Date.now();
+        gguf.card.post({ file: 'card.html', data: data });
+        gguf.ui.toast('已重发到对话');
+        gguf.ui.close();
+      });
+      row.appendChild(left); row.appendChild(btn);
+      wrap.appendChild(row);
+      listEl.appendChild(wrap);
+    });
+  }
+
+  function load() {
+    gguf.storage.get('recent').then(render).catch(function () { render(null); });
+  }
+  load();
+  gguf.events.on('midi-updated', load);
+  gguf.events.on('show', load);
+})();
+</script>
+</body>
+</html>
