@@ -1,7 +1,7 @@
 {
   "id": "com.gguf.tts",
   "name": "朗读",
-  "version": "1.1.4",
+  "version": "1.1.6",
   "apiVersion": 1,
   "description": "消息下方「朗读」角标点按发声；模型也可调用 tts.say 工具直接回一条自动播放的语音消息",
   "author": "gguf",
@@ -34,7 +34,11 @@
     {
       "id": "tts.speak",
       "label": "朗读",
-      "roles": ["assistant", "user"]
+      "roles": [
+        "assistant",
+        "user"
+      ]
     }
-  ]
+  ],
+  "systemClause": "- 发语音：用户要「读出来/用语音说」时直接照做，别说自己不能发声。"
 }

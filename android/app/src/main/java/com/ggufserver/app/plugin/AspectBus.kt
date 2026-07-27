@@ -246,7 +246,8 @@ object AspectBus {
             val remain = deadline - System.currentTimeMillis()
             if (starved || remain < MIN_VIABLE_BUDGET_MS) {
                 starved = true            // 预算见底：后面的一个都不派，逐个记成「没机会表态」
-                android.util.Log.d("GGUF-gw", "aspect ${p.id} 跳过：本面预算已见底（不计熔断）")
+                // 同样是「能力静默丢失」：这个插件本轮压根没被问到，用户可见的日志里要有痕迹
+                com.ggufserver.app.ServerBus.appendLog("[插件:${p.id}] 跳过：本面预算已见底，本轮没轮到它（不计熔断）")
                 onSkipped(p)
                 continue
             }

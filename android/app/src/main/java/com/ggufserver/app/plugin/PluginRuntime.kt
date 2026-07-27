@@ -152,6 +152,7 @@ object PluginRuntime {
                     // service.js 已加载完，从这一刻起 __ggufDispatch 才接得住调用（见 serviceReady）。
                     serviceReady.add(rec.manifest.id)
                     emit(rec.manifest.id, "enable", null)
+                    warmUp(rec.manifest.id)
                 },
             )
             val bridge = PluginBridge(rec.manifest.id, WebViewKind.SERVICE, appContext, wv)
@@ -160,6 +161,24 @@ object PluginRuntime {
             wv.loadUrl("https://$VIRTUAL_HOST/${rec.manifest.id}/$SERVICE_ENTRY")
             wv.resumeTimers()
         }
+    }
+
+    /**
+     * 预热一次分发路径（切主线程 → `evaluateJavascript` → JS 执行 → `respond` 回程），
+     * 把**首次分发的冷启成本从用户的第一句话上挪走**。
+     *
+     * 为什么需要：串行面共享预算（route 150ms），排在后面的插件本来就只拿得到零头；若第一个
+     * 处理器还是冷的，后面的直接被预算地板挡掉——**能力就在用户的第一句话上丢了**（真机 2026-07-27：
+     * 「给我生成悲伤的音乐」那轮整条管线花了 480ms，排在最后的乐句插件根本没被问到）。
+     *
+     * 用一个 SDK 不认识的钩子名：SDK 对未知钩子**立即 respond({})**（gguf-sdk.js），所以又快又无副作用；
+     * 不登记 pending、不记熔断、不记成功——这不是插件的行为，只是把路走热。
+     */
+    private fun warmUp(pluginId: String) {
+        val held = serviceViews[pluginId] ?: return
+        val callId = callIdSeq.incrementAndGet()
+        val script = "__ggufDispatch($callId,\"__warmup__\",\"{}\")"
+        mainHandler.post { runCatching { held.webView.evaluateJavascript(script, null) } }
     }
 
     private fun destroyService(id: String) {
@@ -218,7 +237,9 @@ object PluginRuntime {
         // service.js 还没加载完：这次调用注定没人接。立刻当「本轮无返回」返回，**且不记熔断**——
         // 「没准备好」不是「坏了」（熔断状态落盘，冷启期连发几条就能把好插件永久旁路）。
         if (!serviceReady.contains(pluginId)) {
-            android.util.Log.d("GGUF-gw", "dispatch $pluginId/$hook 跳过：service 尚未就绪（不计熔断）")
+            // 这是**能力静默丢失**的一种（插件本轮完全没参与），所以要进用户可见的运行日志，
+            // 不能只写 logcat——logcat 会滚掉，事后无从追查（2026-07-27 就为此查了很久）。
+            com.ggufserver.app.ServerBus.appendLog("[插件:$pluginId] $hook 跳过：后台脚本尚未就绪（不计熔断）")
             return null
         }
         val callId = callIdSeq.incrementAndGet()
