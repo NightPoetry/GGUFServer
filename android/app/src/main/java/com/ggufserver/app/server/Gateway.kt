@@ -201,6 +201,7 @@ class Gateway(
                 val assembly = assembleWindow(sessionHeader, msgList, contextSize)
                 stripGgufFields(root, msgList)
                 applyContext(msgList, emptyList(), assembly.anyCrossDay, sessionHeader)
+                normalizeForTemplate(msgList)
             }.onFailure { stripGgufFields(root, msgList) }
             root.put("messages", toJsonArray(msgList))
             forwardPlain(client, requestLine, headers, root.toString().toByteArray(Charsets.UTF_8))
@@ -294,6 +295,7 @@ class Gateway(
         // 注入位判据用 curateRegistered（静态登记）而非 curate（本轮就绪者）：位置只能随「用户开关
         // 插件」变，不能随「本轮谁在线」变，否则冷启那几轮 head 会抖（§10 红线 5）。
         applySystemSuffix(msgList, active, hasNativeTools, exposure, reg.curateRegistered.isNotEmpty())
+        normalizeForTemplate(msgList)
         root.put("messages", toJsonArray(msgList))
 
         // ---- params 面：按任务自适应采样参数（§6.10）。必须在 context/systemClause 之后——
@@ -402,10 +404,7 @@ class Gateway(
                 if (tails.isNotEmpty()) append(tails.joinToString("\n")).append('\n')
                 append("以上是给你的背景资料：回答时利用即可，不要复述、引用或提及这些资料本身。")
             }
-            val insertIdx = msgList.indexOfLast { it.optString("role") == "user" }
-            val m = JSONObject().put("role", "system").put("content", block)
-            if (insertIdx >= 0) msgList.add(insertIdx, m) else msgList.add(m)
-            android.util.Log.d("GGUF-gw", "tail 注入 ${block.length} 字（插在 index=$insertIdx 前）")
+            insertTurnBlock(msgList, block, "tail")
         } else {
             android.util.Log.d("GGUF-gw", "tail 零注入（无插件内容且窗口内无跨天消息）")
         }
@@ -486,6 +485,103 @@ class Gateway(
     /** systemClause + 各运行时插件的 callable 教学条款（curate/context 面），追加到首条 system 末尾（§6.5/§6.9/§13.5）。
      *  [exposure]＝本轮 curate 决定暴露的 callable 名集合（§13.4）：null = 全露（默认，等价 v1）。
      *  [curateRegistered]＝本次请求的启用插件里有没有人在 curate 面登记（决定教学**注入位**，见下）。 */
+
+    // ============================== 模板能力探测：换模型不用人管（2026-07-28） ==============================
+
+    /**
+     * 一个模型的 chat 模板能接受什么样的消息序列，是**模型自带的**（`--jinja` 用的就是 GGUF 里那份
+     * 模板），各家写法差别很大。宿主必须探出来再决定怎么拼，否则换个模型就整轮报错：
+     *
+     * - **中途 system**：v1.4 把逐轮可变的内容（curate 的工具教学、context 的 tail 背景块）从首条
+     *   system 挪到「末条用户消息之前」的一条独立 system，为的是保住 KV 前缀。MiniCPM5 的 chatml
+     *   吃得下，但 **Qwen3.5 的模板显式 `raise_exception('System message must be at the beginning.')`**
+     *   ——于是在 Qwen 上，凡是露了工具或注入了 tail 的轮次**整轮 400**（真机 2026-07-28：
+     *   「你能发语音吗」「读一下这句话」全挂；被 route 接管的作曲请求正常，因为那条路不注入）。
+     * - **首条 system**：还有一类模板压根没有 system 角色（Gemma 系），连开头的系统提示词都放不进去。
+     *
+     * 探法：用 llama-server 的 `/apply-template` 试两个样本，看 200 还是 400。一个模型只探一次，
+     * 按 alias 记住（换模型自然重探）。探不通就当「都支持」——维持既有行为，不因探测失败改变拼法。
+     */
+    private data class TemplateCaps(val headSystem: Boolean, val midSystem: Boolean)
+
+    private val templateCaps = ConcurrentHashMap<String, TemplateCaps>()
+
+    private fun applyTemplateOk(messages: List<JSONObject>): Boolean = runCatching {
+        val body = JSONObject().put("messages", toJsonArray(messages)).toString()
+        val url = java.net.URL("http://127.0.0.1:$upstreamPort/apply-template")
+        (url.openConnection() as java.net.HttpURLConnection).run {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 3_000
+            readTimeout = 5_000
+            setRequestProperty("Content-Type", "application/json")
+            outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = responseCode
+            runCatching { inputStream.close() }
+            runCatching { errorStream?.close() }
+            code in 200..299
+        }
+    }.getOrDefault(true)
+
+    private fun caps(): TemplateCaps {
+        val alias = ServerBus.activeAlias.value.ifBlank { "?" }
+        templateCaps[alias]?.let { return it }
+        fun m(role: String, text: String) = JSONObject().put("role", role).put("content", text)
+        val head = applyTemplateOk(listOf(m("system", "A"), m("user", "hi")))
+        val mid = head && applyTemplateOk(
+            listOf(m("system", "A"), m("user", "hi"), m("system", "B"), m("user", "yo")),
+        )
+        val c = TemplateCaps(headSystem = head, midSystem = mid)
+        templateCaps[alias] = c
+        ServerBus.appendLog(
+            "[网关] 模板能力（$alias）：首条 system=" + (if (head) "支持" else "**不支持**（系统提示词将并入首条用户消息）") +
+                "，中途 system=" + (if (mid) "支持" else "**不支持**（逐轮内容将并入末条用户消息，位置同样靠后、KV 前缀不受影响）"),
+        )
+        return c
+    }
+
+    /**
+     * 把一段**本轮临时内容**放到末条用户消息之前。模板不允许中途 system 时退化成
+     * 「并进末条用户消息的开头」——位置一样靠后，**KV 前缀同样不受影响**（这才是当初挪位置的目的），
+     * 代价是小模型可能复述它（1B 上实测会复述，所以首选仍是独立 system 消息）。
+     */
+    private fun insertTurnBlock(msgList: MutableList<JSONObject>, block: String, label: String) {
+        if (block.isBlank()) return
+        val idx = msgList.indexOfLast { it.optString("role") == "user" }
+        if (caps().midSystem) {
+            val m = JSONObject().put("role", "system").put("content", block)
+            if (idx >= 0) msgList.add(idx, m) else msgList.add(m)
+            android.util.Log.d("GGUF-gw", "$label 注入 ${block.length} 字（独立 system，插在 index=$idx 前）")
+        } else if (idx >= 0) {
+            val u = msgList[idx]
+            u.put("content", block + "\n\n" + u.optString("content"))
+            android.util.Log.d("GGUF-gw", "$label 注入 ${block.length} 字（并入末条用户消息：模板不允许中途 system）")
+        } else {
+            msgList.add(JSONObject().put("role", "user").put("content", block))
+        }
+    }
+
+    /**
+     * 拼完消息、转发之前的最后一道模板适配：模板若不支持 system 角色（Gemma 系），把所有 system
+     * 内容按原顺序并进**首条用户消息**的开头，再把 system 消息删掉。确定性变换 ⇒ 同样内容同样字节，
+     * KV 前缀该命中的照旧命中。
+     */
+    private fun normalizeForTemplate(msgList: MutableList<JSONObject>) {
+        if (caps().headSystem) return
+        val sys = msgList.filter { it.optString("role") == "system" }
+        if (sys.isEmpty()) return
+        val merged = sys.joinToString("\n\n") { it.optString("content") }.trim()
+        msgList.removeAll(sys)
+        val firstUser = msgList.indexOfFirst { it.optString("role") == "user" }
+        if (firstUser >= 0) {
+            val u = msgList[firstUser]
+            u.put("content", merged + "\n\n" + u.optString("content"))
+        } else {
+            msgList.add(0, JSONObject().put("role", "user").put("content", merged))
+        }
+        android.util.Log.d("GGUF-gw", "模板不支持 system 角色：已把 ${sys.size} 段系统内容并入首条用户消息")
+    }
+
     private fun applySystemSuffix(
         msgList: MutableList<JSONObject>, active: List<PluginManifest>, hasNativeTools: Boolean,
         exposure: Set<String>?, curateRegistered: Boolean,
@@ -533,11 +629,7 @@ class Gateway(
             }
         }
         if (curateRegistered && teaching.isNotEmpty()) {
-            val block = teaching.joinToString("\n\n").trimEnd()
-            val insertIdx = msgList.indexOfLast { it.optString("role") == "user" }
-            val m = JSONObject().put("role", "system").put("content", block)
-            if (insertIdx >= 0) msgList.add(insertIdx, m) else msgList.add(m)
-            android.util.Log.d("GGUF-gw", "curate 动态教学注入 ${block.length} 字（末条用户消息前，不动 head）")
+            insertTurnBlock(msgList, teaching.joinToString("\n\n").trimEnd(), "curate 动态教学")
         }
     }
 
