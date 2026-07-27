@@ -74,10 +74,15 @@
   gguf.events.on('config-updated', loadConfig);
 
   // ---- JS 规则分类：高置信关键词，命中即定档（宁可漏给 LLM/默认档，不误判） ----
+  //
+  // **1.0.1 补齐算术类**：标注语料实测「1+2 等于几」「算算我这个月一共花了多少钱」「15% 的税，
+  // 1200 块要交多少」都落到 chat(0.7) 档——算术在 0.7 温度下会算错。补的是同义说法，不是新类别。
   var RE_PRECISE = [
     /代码|函数|脚本|报错|编程|写个程序|重构|单元测试|正则/,
     /\b(json|sql|bug|api|html|css|python|kotlin|shell)\b/i,
-    /算一下|计算|等于多少|共多少|总共|平均|百分之|汇率|利息/,
+    // 「算下」不能单列：会被「打算下个月」「预算下调」误伤（留出集实测到）；「一共」同理会命中
+    // 「我们一共聊了挺久」。只留高置信写法。
+    /算一下|算算|计算|等于(?:几|多少)|共多少|总共|平均|百分之|\d+\s*%|汇率|利息|要交多少|每人多少|多少钱/,
     /翻译|译成|改写|润色|总结一下|概括一下|摘要|提取|列成表/,
   ];
   var RE_CREATIVE = [
@@ -87,11 +92,22 @@
     /写.{0,8}(祝福|贺词|情书|演讲稿|开场白)/,
   ];
 
+  /**
+   * **precise 必须先判**（1.0.1 修）。两张表都命中时，谁在前谁赢；原实现是 creative 在前，
+   * 于是「写个函数生成随机诗句」「写个脚本把歌词按行分割」「帮我写段代码，给这些故事排个序」
+   * 统统进 temperature 0.9 —— **拿 0.9 的温度去生成代码**，正好是三档误判里最坏的一种。
+   *
+   * 误判代价是不对称的，顺序要按代价排，不能按直觉排：
+   *   precise 型 → creative(0.9)：代码错、算术错，**最严重**
+   *   creative 型 → precise(0)：诗文干瘪重复，轻（而且用户一眼看得出来，可以重试）
+   *   判不出来 → chat(0.7)：中间档，最轻
+   * 所以冲突时一律偏向 precise：把诗写得干一点，远好过把代码写错。
+   */
   function ruleClassify(text) {
     if (!text) return null;
     var i;
-    for (i = 0; i < RE_CREATIVE.length; i++) if (RE_CREATIVE[i].test(text)) return 'creative';
     for (i = 0; i < RE_PRECISE.length; i++) if (RE_PRECISE[i].test(text)) return 'precise';
+    for (i = 0; i < RE_CREATIVE.length; i++) if (RE_CREATIVE[i].test(text)) return 'creative';
     return null; // 拿不准
   }
 

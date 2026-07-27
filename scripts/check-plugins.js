@@ -293,6 +293,105 @@ reportGeneralization('com.gguf.tts', '朗读', [
   ['他说话声音很小', false], ['这本书值得读吗', false], ['用文字回复就行', false],
 ]);
 
+// ============================== 1.6 params 任务分档 ==============================
+
+/*
+ * 三档：precise(temp 0) / creative(temp 0.9) / chat(temp 0.7，兜底)。
+ *
+ * **代价方向又和前两者都不同**，第一指标是「严重误判数」而不是 recall 或 precision：
+ *   precise 型 → creative(0.9)：**拿 0.9 的温度生成代码、算算术，最严重**
+ *   creative 型 → precise(0)：诗文干瘪重复，轻（用户一眼看得出，可重试）
+ *   判不出来 → chat(0.7)：中间档，最轻（这是设计的兜底方向）
+ *
+ * 2026-07-27 首测抓到一个**结构性**缺陷：`ruleClassify` 里 creative 先判、precise 后判，两张表
+ * 都命中时走 creative ⇒「写个函数生成随机诗句」「写个脚本把歌词按行分割」「帮我写段代码，给这些
+ * 故事排个序」统统跑进 0.9 温度。**顺序要按代价排，不能按直觉排**：改成 precise 先判后，
+ * 调参集 29/29、留出集零严重误判。
+ */
+function checkParamsTier(cases, holdout) {
+  console.log(`\n参数导演（com.gguf.params）任务分档（n=${cases.length}）：`);
+  const hooks = loadService('com.gguf.params');
+  if (!hooks.params) { ok(false, '注册了 params 钩子'); return Promise.resolve(); }
+  const TIER = { 0: 'precise', 0.9: 'creative', 0.7: 'chat' };
+  const run = (list) => list.reduce((acc, [text, want, why]) => acc.then((st) =>
+    Promise.resolve(hooks.params({ source: 'local', text, messages: [] })).then((r) => {
+      const got = TIER[(r.params || {}).temperature];
+      const severe = want === 'precise' && got === 'creative';
+      if (severe) st.severe++; else if (got !== want) st.mild++; else st.hit++;
+      st.rows.push([text, want, got, severe, why]);
+      return st;
+    })), Promise.resolve({ hit: 0, mild: 0, severe: 0, rows: [] }));
+
+  return run(cases).then((st) => {
+    for (const [text, want, got, severe, why] of st.rows) {
+      ok(got === want, `${want} 档「${text}」→ ${got}${severe ? '  ★严重（0.9 温度跑精确任务）' : ''}${why ? `  # ${why}` : ''}`);
+    }
+    console.log(`  ── 判对 ${st.hit}／${cases.length} · **严重误判 ${st.severe}** · 轻度 ${st.mild}`);
+    ok(st.severe === 0, '零严重误判（precise 型绝不能跑进 0.9 温度——这是这里的第一指标）');
+    return run(holdout);
+  }).then((h) => {
+    console.log(`  ── 泛化集（n=${holdout.length}，只报告不断言）：判对 ${h.hit}，严重 ${h.severe}，轻度 ${h.mild}`);
+    console.log(`     轻度基本都是「关键词表没覆盖的同义说法 → 落中间档」，是设计的兜底方向；`);
+    console.log(`     要补的不是词表（补不完，同 §6.14 的天花板），而是插件自带的 useLlm 判断路径。`);
+  });
+}
+
+const paramsCheck = checkParamsTier([
+  // ---- precise：代码 ----
+  ['帮我写一段快速排序的代码', 'precise', '代码'],
+  ['这个函数为什么返回 undefined', 'precise', '函数'],
+  ['帮我看看这个报错怎么解决', 'precise', '报错'],
+  ['写个 python 脚本批量重命名文件', 'precise', '脚本'],
+  ['这段 SQL 怎么优化', 'precise', 'SQL'],
+  ['帮我写个正则匹配手机号', 'precise', '正则'],
+  // ---- precise：算术 ----
+  ['算一下 1234 乘 56 等于多少', 'precise', '算术'],
+  ['15% 的税，1200 块要交多少', 'precise', '百分比'],
+  ['三个人平均分 700 块，每人多少', 'precise', '平均'],
+  ['1+2 等于几', 'precise', '「等于几」'],
+  ['算算我这个月一共花了多少钱', 'precise', '「算算」'],
+  // ---- precise：受限转换 ----
+  ['把这段翻译成英文', 'precise', '翻译'],
+  ['帮我总结一下这篇文章', 'precise', '总结'],
+  ['把这些数据列成表格', 'precise', '列表'],
+  ['把这段话改写得更简洁', 'precise', '改写'],
+  // ---- creative ----
+  ['写一首关于秋天的诗', 'creative', '诗'],
+  ['帮我写个科幻小说的开头', 'creative', '小说'],
+  ['编个睡前故事', 'creative', '故事'],
+  ['给公司周年庆写段祝福语', 'creative', '祝福'],
+  ['帮我想几个产品名字', 'creative', '起名'],
+  ['写一段活动文案', 'creative', '文案'],
+  ['来首打油诗吧', 'creative', '打油诗'],
+  // ---- ★冲突：两张表都沾，必须落 precise ----
+  ['写个函数生成随机诗句', 'precise', '★代码＋诗'],
+  ['写个脚本把歌词按行分割', 'precise', '★脚本＋歌词'],
+  ['帮我写段代码，给这些故事排个序', 'precise', '★代码＋故事'],
+  // ---- chat ----
+  ['今天天气真不错', 'chat', '闲聊'],
+  ['你觉得这个方案怎么样', 'chat', '征求意见'],
+  ['我有点累', 'chat', '情绪'],
+  ['继续', 'chat', '控制词'],
+], [
+  // 泛化集（未参与调参）
+  ['这个循环为什么会死锁', 'precise'],
+  ['帮我把这个类拆成两个文件', 'precise'],
+  ['9 折之后是多少', 'precise'],
+  ['两百八十除以七', 'precise'],
+  ['把下面这段日文翻成中文', 'precise'],
+  ['帮我把要点提取出来', 'precise'],
+  ['给我的猫写个介绍', 'creative'],
+  ['续写一下这个开头', 'creative'],
+  ['帮我起个网名', 'creative'],
+  ['写段生日祝福', 'creative'],
+  ['写个程序自动生成对联', 'precise'],
+  ['帮我写段代码统计小说里的词频', 'precise'],
+  ['我打算下个月搬家', 'chat'],
+  ['我们一共聊了挺久了', 'chat'],
+  ['你好呀', 'chat'],
+  ['这个想法不错', 'chat'],
+]);
+
 // ============================== 2. heavymem 计算两段式 ==============================
 
 /** 从 service.js 里按大括号配对抠出某个顶层函数的源码（免得为了测试把内部实现全导出）。 */
@@ -339,7 +438,8 @@ function checkHeavymemCalc() {
     .then((r) => ok(/一共是 10。依据：a 10。/.test(r.content), '空值被剔除、不算成 0', r.content));
 }
 
-checkHeavymemCalc().then(() => {
+// params 的分档判定是 Promise 形态（钩子本身可能走 LLM 路径），所以要等它跑完再汇总。
+paramsCheck.then(checkHeavymemCalc).then(() => {
   console.log(failed ? `\n✗ ${failed} 项不符` : '\n✓ 全部通过');
   process.exit(failed ? 1 : 0);
 });

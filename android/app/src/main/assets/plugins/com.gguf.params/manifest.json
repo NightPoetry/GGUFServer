@@ -1,7 +1,7 @@
 {
   "id": "com.gguf.params",
   "name": "参数导演",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "apiVersion": 1,
   "description": "按任务类型自动选择采样参数：写作用高温、代码计算用近贪心、聊天用官方推荐档+DRY 防复读",
   "author": "gguf",
