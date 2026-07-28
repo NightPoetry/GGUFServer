@@ -261,6 +261,11 @@ class PluginBridge(
             ServerBus.appendLog("[插件:$provider] 外援没接住这次 $action，本轮回落到本机模型")
             return null
         }
+        // 提供者**主动不接**（§6.16 约定 `{}` = 回落本机：没配好、被 only 筛掉、认不出标签…）。
+        // 这一支必须与「接了」区分开，否则调用方拿到的是一个没有 content/label 的空壳，
+        // 而它多半没有「空壳」这个分支——乐句会直接说「这次没写出能用的片段」，本机模型压根没被问过。
+        // 不写日志、不记熔断：主动不接是常态（用户只勾了某几个插件走外援），逐轮刷日志没有意义。
+        if (!llmProviderTookOver(action, r)) return null
         return r
     }
 
@@ -665,5 +670,20 @@ class PluginBridge(
 
         /** 外援推理的预算：外部 API 走公网，首字就可能好几秒；超了按 fail-open 回落本机模型。 */
         private const val LLM_PROVIDER_BUDGET_MS = 90_000L
+
+        /**
+         * 推理提供者这一轮到底接没接（§6.16）。判据是**它有没有交出这次调用要的东西**，
+         * 而不是「它有没有回话」——`{}` 是规范约定的「我不接，你去打本机」，回话了也等于没接。
+         *
+         * 与发声（§6.13）相反：那边的提供者是**自己把声音放完**再返回 `{}`，所以 `{}` 表示「已处理」；
+         * 这边的提供者只是个中转，不交出 content/label 就等于什么都没发生。同样是 `{}`，
+         * 两个能力点的含义相反，不能共用一套判断。
+         */
+        internal fun llmProviderTookOver(action: String, r: JSONObject): Boolean = when (action) {
+            "chat" -> r.optString("content").isNotBlank()
+            "classify" -> r.optString("label").isNotBlank()
+            // 将来新增的推理动作：至少得回点什么才算接管，空对象一律当没接。
+            else -> r.length() > 0
+        }
     }
 }
