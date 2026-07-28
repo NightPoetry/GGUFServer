@@ -259,9 +259,9 @@ class AspectBusTest {
     fun `没机会表态的处理器按弃权处理 它的工具不该被藏起来`() = runBlocking {
         val notes = manifest("notes", hooks = listOf("curate"), tools = listOf("notes.append"))
         val tts = manifest("tts", hooks = listOf("curate"), tools = listOf("tts.say"))
-        // notes 吃光预算并表态「我这边啥都别露」；tts 排在后面，压根没被问到。
+        // notes 吃光预算（连保底期一起）并表态「我这边啥都别露」；tts 排在后面，压根没被问到。
         val e = AspectBus.curateExposure(listOf(notes, tts), emptyList(), 150) { p, _ ->
-            if (p.id == notes.id) { delay(140); JSONObject().put("expose", JSONArray()) } else JSONObject()
+            if (p.id == notes.id) { delay(400); JSONObject().put("expose", JSONArray()) } else JSONObject()
         }
         assertEquals("没被问到 ≠ 表态失败：tts 的工具应按弃权豁免保留", setOf("tts.say"), e)
     }

@@ -296,6 +296,10 @@ object AspectBus {
         serialForEach(
             handlers, budgetMs, invoke,
             onSkipped = { neverAsked += it },
+            // 冷启第一轮同样会把这面的预算吃光（真机日志里 tts 和 midi 一起被跳过，那一轮模型
+            // 手里就没有工具教学）。给一份保守的保底——curate 漏掉只少露几十 token，不像 route 那样
+            // 丢掉整轮接管，所以额度只有 route 的一半。
+            graceMs = ROUTE_GRACE_MS / 2,
         ) { _, r ->
             val arr = r.optJSONArray("expose") ?: return@serialForEach
             anyOpinion = true
@@ -319,13 +323,25 @@ object AspectBus {
         invoke: suspend (PluginManifest, Long) -> JSONObject?,
         /** 预算见底、**根本没派给它**的处理器（不是它的错，见 [MIN_VIABLE_BUDGET_MS]）。 */
         onSkipped: (PluginManifest) -> Unit = {},
+        /**
+         * 保底期上限（0 = 不保底）。与 route 同一条道理（见 [routeUntilTakeOver]）：App 刚起来主线程
+         * 还在渲染，一次冷 WebView 往返 250ms 就能吃光整面预算，排在后面的插件永远轮不到。
+         * curate 面漏掉的代价比 route 小得多（少露几十 token 教学，且弃权豁免会把它的工具照常放出去），
+         * 所以保底给得也保守。
+         */
+        graceMs: Long = 0L,
         onResult: (PluginManifest, JSONObject) -> Unit,
     ) {
         if (handlers.isEmpty()) return
         val deadline = System.currentTimeMillis() + budgetMs
+        val hardDeadline = deadline + graceMs
         var starved = false
         for (p in handlers) {
-            val remain = deadline - System.currentTimeMillis()
+            var remain = deadline - System.currentTimeMillis()
+            if (!starved && remain < MIN_VIABLE_BUDGET_MS && graceMs > 0) {
+                val spare = hardDeadline - System.currentTimeMillis()
+                if (spare >= COLD_ROUNDTRIP_MS) remain = minOf(spare, COLD_ROUNDTRIP_MS)
+            }
             if (starved || remain < MIN_VIABLE_BUDGET_MS) {
                 starved = true            // 预算见底：后面的一个都不派，逐个记成「没机会表态」
                 // 同样是「能力静默丢失」：这个插件本轮压根没被问到，用户可见的日志里要有痕迹
