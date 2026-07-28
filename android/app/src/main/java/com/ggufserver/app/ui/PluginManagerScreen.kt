@@ -572,6 +572,8 @@ private val PERMISSION_INFO = mapOf(
     "chat:action" to PermInfo("消息角标动作", PermRisk.MEDIUM, "可在消息下方添加动作角标；点击时该条消息的内容会交给插件处理。"),
     "chat:card" to PermInfo("插入消息卡片", PermRisk.MEDIUM, "可在对话里插入由插件自行渲染的消息卡片（如语音消息）。"),
     "cap:tts" to PermInfo("接管发声", PermRisk.MEDIUM, "本机所有语音朗读（含其它插件发起的）将改由该插件处理，朗读文本会流经它；禁用即恢复系统发声。"),
+    "cap:llm" to PermInfo("接管推理（可能把对话发往外部）", PermRisk.HIGH, "插件发起的模型调用将改由该插件应答。若它配置的是外部 API，**这些内容会离开这台手机**——本应用默认一切在本机完成，请确认来源与端点可信；禁用即恢复本机模型。"),
+    "files:save" to PermInfo("存入「下载」", PermRisk.MEDIUM, "可把插件生成的文件（如导出的 .mid）写进系统「下载」目录。"),
     "chat:params" to PermInfo("调整采样参数", PermRisk.MEDIUM, "可按任务类型调整本轮回复的温度等采样参数（外部客户端显式指定的参数不受影响）。"),
     "chat:external" to PermInfo("影响对外 API", PermRisk.HIGH, "会影响局域网内其它设备调用本机 API 时的请求与响应。"),
     "net:lan" to PermInfo("访问局域网", PermRisk.MEDIUM, "可发起局域网 / 本机地址的网络请求。"),

@@ -201,6 +201,9 @@ data class PluginManifest(
                 for (cap in provides) {
                     val need = when (cap) {
                         "tts" -> "cap:tts" // 接管发声：其它插件/宿主的朗读文本改由本插件发声
+                        // 接管推理：别的插件调 gguf.llm.* 时改由本插件回答（外部 API 兜底，§6.16）。
+                        // 风险最高的一个能力点——**对话内容会离开这台手机**，所以单列权限、装时明示。
+                        "llm" -> "cap:llm"
                         else -> null
                     }
                     if (need != null && need !in permissions) {

@@ -30,6 +30,7 @@ function ok(cond, label, extra) {
 function loadService(pluginId) {
   const hooks = {};
   const noop = () => Promise.resolve({});
+  global.__cfgChanged = () => {};
   global.gguf = {
     hooks: new Proxy({}, { get: (_, name) => (fn) => { hooks[name] = fn; } }),
     storage: {
@@ -44,10 +45,22 @@ function loadService(pluginId) {
     },
     card: { post: (o) => { global.__lastCard = o && o.data; } },
     files: { saveDownload: (o) => { global.__saved = o; return Promise.resolve({ ok: true }); } },
+    net: {
+      fetchJson: (o) => {
+        global.__fetch = o;
+        if (global.__fetchFail) return Promise.reject(new Error('网络炸了'));
+        return Promise.resolve(global.__fetchResp
+          || { status: 200, body: JSON.stringify({ choices: [{ message: { content: '外部答案' } }] }) });
+      },
+      fetchAudio: noop,
+    },
     ui: { toast: (t) => { global.__toast = t; }, close() {}, setBadge() {} },
     memllm: { ensure: noop, chat: noop, stop: noop, status: noop },
     tts: { speak: noop, stop: noop, status: noop },
-    events: { on() {}, broadcast() {} },
+    events: {
+      on(name, fn) { if (name === 'relay-cfg-changed') global.__cfgChanged = fn; },
+      broadcast() {},
+    },
     plugin: {}, host: {},
   };
   new Function(fs.readFileSync(path.join(PLUGINS, pluginId, 'service.js'), 'utf8'))();
@@ -777,6 +790,74 @@ function extractFn(src, name) {
   throw new Error('括号不配对：' + name);
 }
 
+
+// ============================== 外援（com.gguf.relay）：推理能力点提供者（§6.16） ==============================
+//
+// 这个插件的全部价值在于「保底」，所以自检盯死一件事：**任何情况下的失败都要朝本机回落**，
+// 绝不能让一个配错的端点把本来能答的一轮弄丢。
+async function checkRelay() {
+  console.log('\n外援（com.gguf.relay）——保底的方向必须永远朝本机：');
+  const hooks = loadService('com.gguf.relay');
+  ok(typeof hooks.llm === 'function', '登记了 llm 提供者钩子');
+
+  const CFG = { enabled: true, endpoint: 'https://x/y', apiKey: 'k', model: 'm', only: [], timeoutMs: 1000 };
+  const call = (payload, cfg) => {
+    global.__store = { cfg: cfg === undefined ? CFG : cfg };
+    global.__cfgChanged();
+    return hooks.llm(payload);
+  };
+
+  // ① 没配好 / 没启用 → 不接管，且根本不该发请求
+  global.__fetch = null;
+  let r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [] },
+    { enabled: false, endpoint: 'https://x/y', model: 'm' });
+  ok(!r.content && global.__fetch === null, '未启用时不接管，且**根本没发请求**');
+  r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [] }, { enabled: true, endpoint: '', model: '' });
+  ok(!r.content && global.__fetch === null, '端点/模型没填时不接管');
+
+  // ② 正常接管
+  global.__fetch = null;
+  r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [{ role: 'user', content: 'hi' }],
+    temperature: 0.9, json_schema: { type: 'object' } });
+  ok(r.content === '外部答案', '启用后接管 chat，返回外部答案');
+  ok(global.__fetch && global.__fetch.url === 'https://x/y', '打到配置的端点');
+  ok(global.__fetch.headers && /^Bearer /.test(global.__fetch.headers.Authorization), '带上 Bearer 鉴权头');
+  ok(global.__fetch.json && global.__fetch.json.json_schema === undefined,
+    '不透传 json_schema（各家云端 API 的结构化输出参数互不相同，硬塞多半 400）');
+  ok(global.__fetch.json.temperature === 0.9, '透传采样参数');
+
+  // ③ 只按调用方筛选，不猜内容
+  global.__fetch = null;
+  r = await call({ action: 'chat', from: 'com.gguf.notes', messages: [] },
+    Object.assign({}, CFG, { only: ['com.gguf.midi'] }));
+  ok(!r.content && global.__fetch === null, 'only 名单外的插件不走外援');
+  r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [] },
+    Object.assign({}, CFG, { only: ['com.gguf.midi'] }));
+  ok(r.content === '外部答案', 'only 名单内的插件走外援');
+
+  // ④ classify：与宿主同构地挂判断指令；认不出标签就不接管
+  global.__fetchResp = { status: 200, body: JSON.stringify({ choices: [{ message: { content: '旋律' } }] }) };
+  r = await call({ action: 'classify', from: 'com.gguf.midi', messages: [{ role: 'user', content: '写首歌' }],
+    question: '哪一类？', labels: ['代码', '旋律'] });
+  ok(r.label === '旋律', 'classify 认出标签');
+  const msgs = global.__fetch.json.messages;
+  const last = msgs[msgs.length - 1];
+  ok(last.role === 'user' && last.content.indexOf('写首歌') === 0 && last.content.indexOf('哪一类') > 0,
+    '判断指令并进末条用户消息（不新增角色，任何模板都合法）');
+  global.__fetchResp = { status: 200, body: JSON.stringify({ choices: [{ message: { content: '我觉得都不是' } }] }) };
+  r = await call({ action: 'classify', from: 'com.gguf.midi', messages: [], question: 'q', labels: ['代码', '旋律'] });
+  ok(!r.label, '认不出标签 → 不接管（好过把一个错标签递出去）');
+
+  // ⑤ 失败一律回落本机
+  global.__fetchResp = { status: 500, body: 'boom' };
+  r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [] });
+  ok(!r.content, 'HTTP 500 → 不接管，回落本机');
+  global.__fetchResp = null; global.__fetchFail = true;
+  r = await call({ action: 'chat', from: 'com.gguf.midi', messages: [] });
+  ok(!r.content, '网络异常 → 不接管，回落本机');
+  global.__fetchFail = false; global.__store = null;
+}
+
 function checkHeavymemCalc() {
   console.log('\n重型记忆（com.gguf.heavymem）计算类问答两段式：');
   const src = fs.readFileSync(path.join(PLUGINS, 'com.gguf.heavymem', 'service.js'), 'utf8');
@@ -810,7 +891,7 @@ function checkHeavymemCalc() {
 }
 
 // params 的分档判定是 Promise 形态（钩子本身可能走 LLM 路径），所以要等它跑完再汇总。
-Promise.resolve(midiCheck).then(() => paramsCheck).then(checkHeavymemCalc).then(() => {
+Promise.resolve(midiCheck).then(() => paramsCheck).then(checkRelay).then(checkHeavymemCalc).then(() => {
   console.log(failed ? `\n✗ ${failed} 项不符` : '\n✓ 全部通过');
   process.exit(failed ? 1 : 0);
 });

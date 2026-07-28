@@ -141,6 +141,11 @@
       // 入参 { action: 'speak'|'stop'|'status', from: 调用方插件id, text?, pitch?, rate? }。
       // status 需返回 { ready, speaking }。钩子内再调 gguf.tts.* = 调穿到宿主默认实现（系统 TTS）。
       tts: register('tts'),
+      // 推理能力提供者（§6.16，manifest 声明 provides:["llm"] 后被分发）：
+      // 入参 { action: 'chat'|'classify', from: 调用方插件id, ...原调用参数 }。
+      // 返回 {} = 我不接这一次（宿主照旧打本机模型）——「保底」的回落方向。
+      // 钩子内再调 gguf.llm.* = 调穿到本机模型（提供者自己调不会递归回自己）。
+      llm: register('llm'),
     },
     events: {
       on: function (name, fn) {
@@ -252,6 +257,9 @@
     // → { status, url（本插件域名下的音频地址，fetch 后交给 Web Audio）, bytes }
     gguf.net = {
       fetchAudio: function (opts) { return callHost('net.fetchAudio', opts || {}); },
+      // 宿主代取 JSON（§6.16）：{ url, json?, method?, headers?, timeoutMs? } → { status, body }
+      // body 是**没被解析过的原文**——宿主不理解外部 API 的格式，解析由插件自己做。
+      fetchJson: function (opts) { return callHost('net.fetchJson', opts || {}); },
     };
   }
   if (granted['files:save']) {

@@ -112,9 +112,11 @@ class PluginBridge(
             JSONObject()
         }
         "storage.keys" -> JSONObject().put("keys", JSONArray(PluginStore.kvKeys(pluginId)))
-        "llm.chat" -> { requirePermission("llm"); llmChat(args) }
-        "llm.chatStream" -> { requirePermission("llm"); llmChatStream(args) }
-        "llm.classify" -> { requirePermission("llm"); llmClassify(args) }
+        // 推理是可被接管的能力点（§6.16 补丁式依赖，与发声 §6.13 同构）：有提供者时改道进它，
+        // 让「本机模型答不好的活」可以落到外部 API 上；没有提供者就照旧打本机 llama-server。
+        "llm.chat" -> { requirePermission("llm"); llmRoute("chat", args) ?: llmChat(args) }
+        "llm.chatStream" -> { requirePermission("llm"); llmChatStream(args) }   // 流式暂不改道，见 llmRoute
+        "llm.classify" -> { requirePermission("llm"); llmRoute("classify", args) ?: llmClassify(args) }
         // 记忆模型（第二个 llama-server 实例）：重型记忆插件的双模型后台检索。gate 在 llm 权限。
         "memllm.ensure" -> { requirePermission("llm"); MemoryModelServer.ensure(context, args.getString("modelPath")) }
         "memllm.chat" -> { requirePermission("llm"); MemoryModelServer.chat(args) }
@@ -172,6 +174,9 @@ class PluginBridge(
         // （页面源是 https://plugin.gguf，自建推理服务器普遍不回 CORS 头）。宿主用原生 HTTP
         // 取回音频、落到插件的网络缓存目录，返回本插件虚拟域名 __net__/ 下的 URL——同源、无 CORS。
         "net.fetchAudio" -> netFetchAudio(args)
+        // 宿主代取 JSON（§6.16 外援插件调外部 API 用）：与 fetchAudio 同一套主机白名单，
+        // 区别只在响应当文本读回来而不是落成音频文件。
+        "net.fetchJson" -> netFetchJson(args)
         // 把插件生成的二进制存进系统「下载」目录（§6.15）。给「导出 .mid / 导出音频」这类动作用——
         // 插件在 WebView 里能生成字节，但没有任何通道把它交给用户，只能经宿主落盘。
         "files.saveDownload" -> { requirePermission("files:save"); saveDownload(args) }
@@ -230,6 +235,35 @@ class PluginBridge(
      * - 提供者超时/异常 → fail-open 落回默认实现（超时同时计入熔断，连挂 3 次自动旁路，
      *   发声整体回到出厂行为）。
      */
+    /**
+     * 推理能力点的路由（§6.16）：有生效提供者（启用、未熔断、声明 `provides:["llm"]`）且**调用方
+     * 不是提供者本人**时，把这次 `gguf.llm.*` 调用改道进它的 `llm` 钩子；否则返回 null 走本机模型。
+     *
+     * 与发声（§6.13）同构，但有三点不同，都是「这条路会把内容送出手机」带来的：
+     * - **提供者自己调 = 调穿**（`provider != pluginId`）：外援插件内部当然可能想问本机模型，
+     *   不这样会自己递归调自己。
+     * - **预算给足**：外部 API 走公网，几秒是常态；本机模型的 llmChat 也没有超时上限。
+     * - **失败即回落**：提供者返回 null（超时/异常/它自己拒绝）时**不报错**，照旧打本机模型——
+     *   「保底」的方向是外部答不了退回本机，不是把本机也拖死。
+     *
+     * 流式（`chatStream`）暂不改道：它的令牌回程走的是另一条通道（`__ggufStream`），
+     * 提供者要复刻一遍才有意义，等有真实需求再说。此时提供者装着也不影响流式路径。
+     */
+    private fun llmRoute(action: String, args: JSONObject): JSONObject? {
+        val provider = PluginStore.activeProvider("llm") ?: return null
+        if (provider == pluginId) return null
+        val payload = JSONObject().put("action", action).put("from", pluginId)
+        args.keys().forEach { k -> payload.put(k, args.opt(k)) }
+        val r = runCatching {
+            runBlocking { PluginRuntime.dispatch(provider, "llm", payload, LLM_PROVIDER_BUDGET_MS) }
+        }.getOrNull()
+        if (r == null) {
+            ServerBus.appendLog("[插件:$provider] 外援没接住这次 $action，本轮回落到本机模型")
+            return null
+        }
+        return r
+    }
+
     private fun ttsRoute(action: String, args: JSONObject): JSONObject {
         val provider = PluginStore.activeProvider("tts")
         if (provider != null && provider != pluginId) {
@@ -258,6 +292,49 @@ class PluginBridge(
      * （每次清旧只留最新），返回 { status, url, bytes }——url 是本插件虚拟域名 __net__/ 下的
      * 同源地址，WebView fetch 它不受 CORS 约束。上限 20MB，超时默认 60s（推理服务器可能较慢）。
      */
+    /**
+     * gguf.net.fetchJson：宿主代插件发一次 HTTP 并把响应体当文本读回。
+     *
+     * 为什么要经宿主：插件页面源是 `https://plugin.gguf`，直接 fetch 外部端点一律撞 CORS
+     * （云端 API 不会为一个虚拟域名开 CORS）。走宿主则是原生 HTTP，没有同源约束。
+     *
+     * 目标主机按权限校验（`net:lan` = 环回/私网段，`net:internet` = 任意），响应上限 2MB。
+     * **不解析、不改写**响应体，原样交回插件——宿主不该理解外部 API 的格式。
+     */
+    private fun netFetchJson(args: JSONObject): JSONObject {
+        val urlStr = args.optString("url").ifBlank { throw RuntimeException("缺少 url") }
+        val u = URL(urlStr)
+        if (u.protocol != "http" && u.protocol != "https") throw RuntimeException("仅支持 http/https")
+        val m = manifest() ?: throw SecurityException("插件不存在或已卸载")
+        val hostOk = when {
+            "net:internet" in m.permissions -> true
+            "net:lan" in m.permissions -> isLanHost(u.host)
+            else -> false
+        }
+        if (!hostOk) throw SecurityException("目标主机不在授权范围（需 net:lan / net:internet 权限）")
+
+        val conn = u.openConnection() as HttpURLConnection
+        conn.connectTimeout = args.optInt("connectTimeoutMs", 10_000).coerceIn(1_000, 60_000)
+        conn.readTimeout = args.optInt("timeoutMs", 60_000).coerceIn(1_000, 300_000)
+        args.optJSONObject("headers")?.let { h ->
+            h.keys().forEach { k -> conn.setRequestProperty(k, h.optString(k)) }
+        }
+        val bodyJson = args.optJSONObject("json")
+        if (bodyJson != null) {
+            conn.requestMethod = args.optString("method", "POST")
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(bodyJson.toString().toByteArray(Charsets.UTF_8)) }
+        } else {
+            conn.requestMethod = args.optString("method", "GET")
+        }
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (text.length > 2 * 1024 * 1024) throw RuntimeException("响应超过 2MB 上限")
+        return JSONObject().put("status", code).put("body", text)
+    }
+
     private fun netFetchAudio(args: JSONObject): JSONObject {
         val urlStr = args.optString("url").ifBlank { throw RuntimeException("缺少 url") }
         val u = URL(urlStr)
@@ -585,5 +662,8 @@ class PluginBridge(
 
         /** 发声提供者钩子的预算：提供者只做文本加工 + 调穿，正常毫秒级；超时即落回默认实现。 */
         private const val TTS_PROVIDER_BUDGET_MS = 5_000L
+
+        /** 外援推理的预算：外部 API 走公网，首字就可能好几秒；超了按 fail-open 回落本机模型。 */
+        private const val LLM_PROVIDER_BUDGET_MS = 90_000L
     }
 }
