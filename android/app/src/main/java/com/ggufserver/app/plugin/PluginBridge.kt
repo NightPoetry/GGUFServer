@@ -172,7 +172,52 @@ class PluginBridge(
         // （页面源是 https://plugin.gguf，自建推理服务器普遍不回 CORS 头）。宿主用原生 HTTP
         // 取回音频、落到插件的网络缓存目录，返回本插件虚拟域名 __net__/ 下的 URL——同源、无 CORS。
         "net.fetchAudio" -> netFetchAudio(args)
+        // 把插件生成的二进制存进系统「下载」目录（§6.15）。给「导出 .mid / 导出音频」这类动作用——
+        // 插件在 WebView 里能生成字节，但没有任何通道把它交给用户，只能经宿主落盘。
+        "files.saveDownload" -> { requirePermission("files:save"); saveDownload(args) }
         else -> throw RuntimeException("未知桥接口：$api")
+    }
+
+    /**
+     * 把插件给的 base64 字节写进系统「下载」目录，返回可见的文件名。
+     *
+     * 为什么要它：插件跑在 WebView 里，能算出 .mid / .wav 的字节，却**没有任何通道交给用户**
+     * （data: URL 下载在 WebView 里不可靠、storage 只存 JSON）。API 29+ 走 MediaStore 的
+     * Downloads 集合，不需要任何运行时权限；更老的系统退回公共下载目录。
+     * 同名文件不覆盖：自动加 -1 / -2 后缀（用户导出多首曲子是常态）。
+     */
+    private fun saveDownload(args: JSONObject): JSONObject {
+        val rawName = args.optString("name").ifBlank { "gguf-export.bin" }
+        val name = rawName.replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), "_").take(80)
+        val mime = args.optString("mime").ifBlank { "application/octet-stream" }
+        val bytes = android.util.Base64.decode(args.optString("base64"), android.util.Base64.DEFAULT)
+        if (bytes.isEmpty()) throw RuntimeException("saveDownload: 内容为空")
+        if (bytes.size > 8 * 1024 * 1024) throw RuntimeException("saveDownload: 超过 8MB 上限")
+
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, mime)
+                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw RuntimeException("saveDownload: 系统没给下载目录的写入位置")
+            resolver.openOutputStream(uri).use { it?.write(bytes) }
+            values.clear()
+            values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            PluginStore.toast("已保存到「下载」：$name")
+            return JSONObject().put("ok", true).put("name", name).put("uri", uri.toString())
+        }
+        val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+        dir.mkdirs()
+        var f = java.io.File(dir, name)
+        var i = 1
+        while (f.exists()) { f = java.io.File(dir, name.replace(Regex("(\\.[^.]*)$"), "-$i$1")); i++ }
+        f.writeBytes(bytes)
+        PluginStore.toast("已保存到「下载」：${f.name}")
+        return JSONObject().put("ok", true).put("name", f.name).put("uri", f.absolutePath)
     }
 
     /**
@@ -365,8 +410,16 @@ class PluginBridge(
      * 只预填判断指令几十 token；判断后 llama-server 剪尾（与「重试候选」同机制），回答请求只补
      * assistant 开头即开始流式——判断对缓存零残留、还顺手替回答付了本轮用户消息的预填。
      *
-     * 采样固定判定档：temperature 0 + json_schema 顶层 enum；**绝不带 repeat_penalty/DRY**
-     * （实测惩罚会把受限枚举判定打偏：假阴 0→9，见《推理参数与外部知识架构研究》§三）。
+     * 采样固定判定档：temperature 0；**绝不带 repeat_penalty/DRY**（实测惩罚会把枚举判定打偏：
+     * 假阴 0→9，见《推理参数与外部知识架构研究》§三）。
+     *
+     * **先自由生成，受限解码只当保底**（2026-07-28 真机改）：原来一律下发 `json_schema` 顶层 enum，
+     * 那是在 MiniCPM-1B 上验证过的。换到 Qwen3.5-2B 上一量，受限 enum **完全没有区分力**——同一批
+     * 用例不论问什么都返回同一个标签；用 object schema 让它「先写理由再给结论」时，**理由写得完全
+     * 正确、结论却仍然选错**（「用户请求创作欢快音乐，属于创意生成任务」→ 结论「代码」）。也就是说
+     * 模型判得出来，是 GBNF 把第一个 token 钉死在某个选项上、模型没有「想」的余地。
+     * 同样六条用例改成不受限、只让它回一个词：**5/6 正确、每次 1.1s**。所以先自由生成 + 解析标签，
+     * 解析不到再退回受限解码（老模型上 enum 仍然稳，两头都保住）。
      */
     private fun llmClassify(args: JSONObject): JSONObject {
         val labels = args.optJSONArray("labels") ?: throw RuntimeException("classify 缺少 labels")
@@ -377,20 +430,66 @@ class PluginBridge(
         val labelList = ArrayList<String>(labels.length())
         for (i in 0 until labels.length()) labels.optString(i).ifBlank { null }?.let { labelList += it }
 
+        val instruction = question + "\n只回答下列之一，不要解释：" + labelList.joinToString(" / ")
         val judged = JSONArray()
         for (i in 0 until messages.length()) judged.put(messages.optJSONObject(i))
-        judged.put(
-            JSONObject().put("role", "system")
-                .put("content", question + "\n只从以下选项中选一个作答：" + labelList.joinToString("／"))
-        )
+        // **判断指令怎么挂，随模板走**（2026-07-28 修）：追加一条 system 是 KV 最优的挂法（前面一字
+        // 不动 = 严格后缀扩展），但 Qwen 系模板显式禁止中途 system——整个判断请求 HTTP 400，判断
+        // 静默失败、调用方只看到「判不出来」。真机上乐句插件的深判每次都是这么废掉的。
+        // 模板不吃中途 system 时改为并进**末条用户消息的末尾**：不新增角色、任何模板都合法，
+        // 前面的消息同样一字不动（只有最后一条多了个尾巴，前缀分叉点后移到它，代价是几十 token）。
+        val midSystemOk = runCatching { com.ggufserver.app.server.TemplateProbe.caps().midSystem }.getOrDefault(true)
+        val lastUserIdx = (judged.length() - 1 downTo 0)
+            .firstOrNull { judged.optJSONObject(it)?.optString("role") == "user" } ?: -1
+        val lastUserText = judged.optJSONObject(lastUserIdx)?.opt("content") as? String
+        if (!midSystemOk && lastUserIdx >= 0 && lastUserText != null) {
+            // 拷一份再改：messages 是调用方（插件）传进来的那份，就地改会污染它本轮的其它用途
+            judged.put(
+                lastUserIdx,
+                JSONObject(judged.optJSONObject(lastUserIdx).toString())
+                    .put("content", lastUserText + "\n\n" + instruction),
+            )
+        } else {
+            judged.put(JSONObject().put("role", "system").put("content", instruction))
+        }
 
+        // 第一遍：不受限，只让它回一个词（12 token 足够，实测 1.1s）
+        val t0 = System.currentTimeMillis()
+        var resp = postJudge(judged, null, 12)
+        var raw = rawOf(resp)
+        var label = pickLabel(raw, labelList)
+        var constrained = false
+        if (label == null) {
+            // 保底：受限解码。老模型（MiniCPM-1B）上 enum 稳；这里是「自由生成没说出任何一个标签」
+            // 才会走到——多花一次往返，好过整个判断作废。
+            resp = postJudge(judged, labelList, args.optInt("maxTokens", 24))
+            raw = rawOf(resp)
+            label = pickLabel(raw, labelList)
+            constrained = true
+        }
+        // 判断是用户实打实等着的那一秒多，且判错就是能力错位——把「判成了什么」记进运行日志，
+        // 否则出问题只能靠猜（这次真机就是卡在「深判到底判成了什么」上）。
+        ServerBus.appendLog(
+            "[插件:$pluginId] LLM 判断 ${System.currentTimeMillis() - t0}ms" +
+                (if (constrained) "（自由生成没认出标签，已退回受限解码）" else "") +
+                "：得到「${label ?: "—"}」，模型原话「${raw.trim().take(24)}」",
+        )
+        return JSONObject()
+            .put("label", label ?: JSONObject.NULL)
+            .put("timings", resp.optJSONObject("timings") ?: JSONObject())
+    }
+
+    /** 发一次判断请求。[enumLabels] 非空则下发受限解码（GBNF），否则自由生成。 */
+    private fun postJudge(judged: JSONArray, enumLabels: List<String>?, maxTokens: Int): JSONObject {
         val body = JSONObject()
             .put("model", ServerBus.activeAlias.value.ifBlank { "local" })
             .put("messages", judged)
             .put("stream", false)
             .put("temperature", 0)
-            .put("max_tokens", args.optInt("maxTokens", 24))
-            .put("json_schema", JSONObject().put("type", "string").put("enum", JSONArray(labelList)))
+            .put("max_tokens", maxTokens)
+        if (enumLabels != null) {
+            body.put("json_schema", JSONObject().put("type", "string").put("enum", JSONArray(enumLabels)))
+        }
         val conn = openInternal()
         conn.connectTimeout = 10_000
         conn.readTimeout = 60_000
@@ -400,14 +499,23 @@ class PluginBridge(
             val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
             throw RuntimeException("判断调用失败 HTTP $code：${err.take(200)}")
         }
-        val resp = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-        val raw = resp.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content").orEmpty()
-        // 受限解码输出是 JSON 字符串字面量（如 "\"聊天\""），解不出来再退回去壳裸串
-        val label = runCatching { JSONObject("{\"v\":$raw}").optString("v") }.getOrNull()
-            ?.takeIf { it in labelList } ?: raw.trim().trim('"').takeIf { it in labelList }
-        return JSONObject()
-            .put("label", label ?: JSONObject.NULL)
-            .put("timings", resp.optJSONObject("timings") ?: JSONObject())
+        return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+    }
+
+    private fun rawOf(resp: JSONObject): String =
+        resp.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content").orEmpty()
+
+    /**
+     * 从模型输出里认出标签：**出现位置最靠前的那个**（并列时取更长的，避免「不是要作曲」被
+     * 「要作曲」抢先）。受限解码的输出是 JSON 字符串字面量（`"\"聊天\""`），先去壳再找。
+     */
+    private fun pickLabel(raw: String, labelList: List<String>): String? {
+        val text = runCatching { JSONObject("{\"v\":$raw}").optString("v") }.getOrNull() ?: raw.trim().trim('"')
+        if (text.isBlank()) return null
+        return labelList
+            .mapNotNull { l -> text.indexOf(l).takeIf { it >= 0 }?.let { it to l } }
+            .minWithOrNull(compareBy({ it.first }, { -it.second.length }))
+            ?.second
     }
 
     // ---- gguf.chat.* / gguf.sessions.*：经 ChatStore + “最近一次本机来源请求的 sessionId” ----

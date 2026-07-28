@@ -339,6 +339,9 @@ class LlamaServerService : Service() {
         reachedRunning = true
         ServerBus.setState(ServerState.RUNNING)
         updateNotification("运行中 · $modelName · 端口 $port")
+        // 模板能力**趁现在探**（两次 /apply-template，几十毫秒）：否则第一次探测会落在某个请求路径的
+        // 预算里——真机上它正好落进 route 深判的预算，把本来就紧的那 3 秒又吃掉一截。
+        thread(name = "template-probe", isDaemon = true) { runCatching { TemplateProbe.caps() } }
     }
 
     /** Polls the llama-server /health on [pollPort] until 200, then flips state to RUNNING. */

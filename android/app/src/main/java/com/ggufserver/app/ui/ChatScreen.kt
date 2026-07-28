@@ -1569,8 +1569,11 @@ private fun MessageRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(Icons.Outlined.PushPin, null, Modifier.size(13.dp), tint = tones.accent)
-                    // noted 现在存完整确认句（已记入/已更新/已删除…）；旧数据只存内容，补上前缀
-                    val label = if (noted.startsWith("已") || noted.startsWith("便签")) noted else "已记入便签：$noted"
+                    // **不要硬套便签的措辞**：notice 是所有插件共用的通道（§6.6），乐句会写
+                    // 「这段乐句没认出可用的音符」、朗读会写别的——旧代码给不以「已/便签」开头的
+                    // 一律加「已记入便签：」前缀，于是真机上出现了「已记入便签：这段乐句没认出可用的音符」。
+                    // 插件自己写的确认句就是完整句子，原样显示即可（很老的便签数据会少个前缀，可接受）。
+                    val label = noted
                     Text(
                         label,
                         fontSize = 12.sp, lineHeight = 17.sp,

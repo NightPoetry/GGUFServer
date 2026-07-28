@@ -268,9 +268,15 @@ class Gateway(
         val reg = AspectRegistry(active, hasNativeTools, constrained) { PluginRuntime.isServiceReady(it.id) }
         val isStream = root.optBoolean("stream", false)
 
-        // ---- route 面：串行、可接管，总预算 150ms（红线：request 路径同步点之一） ----
-        val takeOver = AspectBus.routeUntilTakeOver(reg.route, Aspects.ROUTE_BUDGET_MS) { p, remain ->
-            PluginRuntime.dispatch(p.id, "route", turn, remain)
+        // ---- route 面：串行、可接管，快判定总预算 150ms（红线：request 路径同步点之一） ----
+        // 就绪宽限（不在任何切面预算内）：等一等还没加载完 service.js 的 route 处理器，否则「开 App
+        // 说的第一句话」和「从别的 App 切回来说的第一句话」都会因为插件没就绪而丢掉确定性接管。
+        PluginRuntime.awaitColdStart(reg.route.map { it.id }, COLD_START_GRACE_MS)
+        // 快判定拿不准的插件可申请深判（§6.2 两段式）：第二遍拿独立预算，允许调一次 llm.classify。
+        val takeOver = AspectBus.routeUntilTakeOver(
+            reg.route, Aspects.ROUTE_BUDGET_MS, Aspects.DEEP_ROUTE_BUDGET_MS,
+        ) { p, remain, deep ->
+            PluginRuntime.dispatch(p.id, "route", if (deep) deepTurn(turn) else turn, remain)
         }
         // generate 面（接管分支）：某插件接管本轮 = 用它的 handle 替换默认 generate（默认 generate = 转发 llama-server）。
         if (takeOver != null) return Plan(takeOver, null, reg.toolCallables, reg.afterReply, reg.continuation, isStream)
@@ -502,43 +508,18 @@ class Gateway(
      * 探法：用 llama-server 的 `/apply-template` 试两个样本，看 200 还是 400。一个模型只探一次，
      * 按 alias 记住（换模型自然重探）。探不通就当「都支持」——维持既有行为，不因探测失败改变拼法。
      */
-    private data class TemplateCaps(val headSystem: Boolean, val midSystem: Boolean)
+    /** 就绪宽限上限：只在插件的 service WebView 还没加载完时花掉（冷启给满额，重建给一半）。 */
+    private val COLD_START_GRACE_MS = 2_500L
 
-    private val templateCaps = ConcurrentHashMap<String, TemplateCaps>()
+    /**
+     * 深判用的 turn：原样一份 + `deep:true`。**拷贝而不是就地打标**——turn 后面还要交给 curate /
+     * context 面，留一个只对 route 第二遍有意义的字段会误导它们。
+     */
+    private fun deepTurn(turn: JSONObject): JSONObject =
+        JSONObject(turn.toString()).put("deep", true)
 
-    private fun applyTemplateOk(messages: List<JSONObject>): Boolean = runCatching {
-        val body = JSONObject().put("messages", toJsonArray(messages)).toString()
-        val url = java.net.URL("http://127.0.0.1:$upstreamPort/apply-template")
-        (url.openConnection() as java.net.HttpURLConnection).run {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 3_000
-            readTimeout = 5_000
-            setRequestProperty("Content-Type", "application/json")
-            outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val code = responseCode
-            runCatching { inputStream.close() }
-            runCatching { errorStream?.close() }
-            code in 200..299
-        }
-    }.getOrDefault(true)
-
-    private fun caps(): TemplateCaps {
-        val alias = ServerBus.activeAlias.value.ifBlank { "?" }
-        templateCaps[alias]?.let { return it }
-        fun m(role: String, text: String) = JSONObject().put("role", role).put("content", text)
-        val head = applyTemplateOk(listOf(m("system", "A"), m("user", "hi")))
-        val mid = head && applyTemplateOk(
-            listOf(m("system", "A"), m("user", "hi"), m("system", "B"), m("user", "yo")),
-        )
-        val c = TemplateCaps(headSystem = head, midSystem = mid)
-        templateCaps[alias] = c
-        ServerBus.appendLog(
-            "[网关] 模板能力（$alias）：首条 system=" + (if (head) "支持" else "**不支持**（系统提示词将并入首条用户消息）") +
-                "，中途 system=" + (if (mid) "支持" else "**不支持**（逐轮内容将并入末条用户消息，位置同样靠后、KV 前缀不受影响）"),
-        )
-        return c
-    }
+    /** 模板能力（首条/中途 system）：抽到 [TemplateProbe] 共享——插件的 llm.classify 也要用同一份事实。 */
+    private fun caps(): TemplateProbe.Caps = TemplateProbe.caps(upstreamPort)
 
     /**
      * 把一段**本轮临时内容**放到末条用户消息之前。模板不允许中途 system 时退化成

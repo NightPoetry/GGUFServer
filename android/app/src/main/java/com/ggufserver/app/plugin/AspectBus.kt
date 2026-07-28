@@ -48,6 +48,20 @@ object Aspects {
 
     // ---- 每切面预算（§13.3，与 §6.1 时序一致）。分发面按此 withTimeout；request 路径同步点超预算立即跳过。----
     const val ROUTE_BUDGET_MS = 150L
+    /**
+     * **route 深判预算**（§6.2 两段式判定）：快判定拿不准时，插件返回 `deep:true` 申请一次慢判——
+     * 通常是 `llm.classify`（真机 Qwen3.5-2B 稳态约 1.1s，首次 2.1s）。不占 [ROUTE_BUDGET_MS]：
+     * 那 150ms 是给「一句话扫一遍正则」的，跟「问一次模型」差两个数量级，混在一起等于永远超时。
+     *
+     * 为什么值得多等这一秒：route 判错的代价是不对称的——漏接管 = 能力静默消失（用户要曲子却拿到
+     * 一段歌词），误接管 = 整轮被替换。正则吃得下句法、吃不下语义（§6.14 的天花板：同一套方法
+     * route 泛化集 100%、curate 只有 42%），而**关键字命中的轮次本就是少数**，只在这些轮次上花钱。
+     *
+     * 取 6s 而不是 3s：稳态 1.1s，但**模型加载后的第一次推理是冷的**（权重还没进 page cache），
+     * 真机实测 3.4s——3s 预算下第一轮深判必然超时，等于「刚开机那几句话照样判不出来」，正是
+     * 这个功能最该管住的场景。超时仍按 fail-open 不接管。
+     */
+    const val DEEP_ROUTE_BUDGET_MS = 6_000L
     const val CURATE_BUDGET_MS = 150L      // 与 route 同属请求路径同步点、同为快判定（禁调 LLM）
     const val CONTEXT_BUDGET_MS = 250L
     // params：JS 规则路径毫秒级返回；LLM 判断路径 = 前缀扩展分类（判断请求顺手预填了本轮对话前缀，
@@ -142,20 +156,88 @@ object AspectBus {
     const val MIN_VIABLE_BUDGET_MS = 40L
 
     /**
+     * 一次**冷** WebView 往返的实测上界（真机 190ms：App 刚起来、主线程还在渲染 Compose，
+     * `evaluateJavascript` 要排在 UI 工作后面）。稳态只要 45ms——保底期按冷的给，否则补问照样超时，
+     * 等于白补（这个坑真机撞了两次：先是没保底，后是保底只给了 80ms）。
+     */
+    const val COLD_ROUNDTRIP_MS = 250L
+
+    /**
+     * route 保底期的总上限。route 面漏接管 = 整轮能力消失，值得为它多花这些毫秒；但也不能没边，
+     * 500ms 够补问两个处理器（route 处理器本来就少），再多的仍按「没轮到」记日志。
+     */
+    const val ROUTE_GRACE_MS = 500L
+
+    /**
      * route 语义：串行分发，共享 [budgetMs] deadline，第一个返回 `takeOver:true` 的处理器接管本轮
      * （后续不再询问）。返回接管者，或 null（无人接管 / 无处理器 / 预算耗尽）。
+     *
+     * **两段式判定**（§6.2，2026-07-28 加）：快判定这一遍只准跑正则级判断，谁也不许调 LLM——它是
+     * 请求路径同步点，150ms 是给「扫一遍句子」的。拿不准的处理器返回 `deep:true` 申请第二遍，
+     * 第二遍拿 [deepBudgetMs] 的**独立预算**，可以调 `llm.classify`。
+     *
+     * 这解决的是关键字判定的天花板：手写枚举总会漏掉最朴素的说法（乐句插件为「写…音乐」栽过三次），
+     * 而放宽枚举又会把「写个音乐播放器」这类代码请求误接管成作曲。宽关键字负责召回、LLM 负责精度，
+     * 代价只落在**命中关键字的少数轮次**上。
      */
     suspend fun routeUntilTakeOver(
         handlers: List<PluginManifest>,
         budgetMs: Long,
-        invoke: suspend (PluginManifest, Long) -> JSONObject?,
+        deepBudgetMs: Long = 0L,
+        invoke: suspend (p: PluginManifest, remain: Long, deep: Boolean) -> JSONObject?,
     ): PluginManifest? {
         if (handlers.isEmpty()) return null
         val deadline = System.currentTimeMillis() + budgetMs
-        for (p in handlers) {
-            val remain = deadline - System.currentTimeMillis()
-            if (remain < MIN_VIABLE_BUDGET_MS) break   // 预算见底：不派（派了也是白记它一次超时）
-            val r = guard(p, remain, invoke)
+        // **保底期**（2026-07-28）：预算见底时不是直接不派，而是再给每个没被问过的处理器一次
+        // 最小可用预算，总共不超过再来一份 budgetMs。理由是代价不对称——route 丢的是「整轮接管」
+        // （用户要曲子、拿到一段模型自己编的音名文本），而多花的是几十毫秒首字延迟。
+        // 真机撞到的就是这个：App 刚起来主线程还在渲染，排在前面的插件一次 WebView 往返就吃掉
+        // 190ms，排在后面的乐句永远轮不到——「开 App 说的第一句话丢接管」的真凶是它，不是没就绪。
+        val hardDeadline = deadline + ROUTE_GRACE_MS
+        var overrunLogged = false
+        val wantDeep = ArrayList<PluginManifest>()
+        for ((i, p) in handlers.withIndex()) {
+            var remain = deadline - System.currentTimeMillis()
+            if (remain < MIN_VIABLE_BUDGET_MS) {
+                val spare = hardDeadline - System.currentTimeMillis()
+                if (spare < COLD_ROUNDTRIP_MS) {
+                    // 保底也用尽了：这才是真的没轮到。**留痕**——静默跳过等于能力凭空消失，
+                    // 事后无从追查（curate 面 2026-07-27 已补日志，route 面一直漏着）。
+                    com.ggufserver.app.ServerBus.appendLog(
+                        "[网关] route 面预算与保底都已用尽（${budgetMs}+${ROUTE_GRACE_MS}ms），本轮没轮到：" +
+                            handlers.drop(i).joinToString("、") { it.id } + "（它们的接管能力本轮缺席）",
+                    )
+                    break
+                }
+                if (!overrunLogged) {
+                    overrunLogged = true
+                    com.ggufserver.app.ServerBus.appendLog(
+                        "[网关] route 面 ${budgetMs}ms 预算已见底，转保底逐个补问（漏掉接管比多等几十毫秒贵）：" +
+                            handlers.drop(i).joinToString("、") { it.id },
+                    )
+                }
+                remain = minOf(spare, COLD_ROUNDTRIP_MS)
+            }
+            val r = guard(p, remain) { pp, rr -> invoke(pp, rr, false) }
+            if (r?.optBoolean("takeOver") == true) return p
+            if (r?.optBoolean("deep") == true) wantDeep += p
+        }
+        if (wantDeep.isEmpty() || deepBudgetMs < MIN_VIABLE_BUDGET_MS) return null
+
+        // ---- 第二遍：慢判。用户会实打实地多等这段时间，所以**必须留痕**（延迟要可解释）----
+        com.ggufserver.app.ServerBus.appendLog(
+            "[网关] route 快判定拿不准，转深判（最多 ${deepBudgetMs}ms）：" + wantDeep.joinToString("、") { it.id },
+        )
+        val deepDeadline = System.currentTimeMillis() + deepBudgetMs
+        for ((i, p) in wantDeep.withIndex()) {
+            val remain = deepDeadline - System.currentTimeMillis()
+            if (remain < MIN_VIABLE_BUDGET_MS) {
+                com.ggufserver.app.ServerBus.appendLog(
+                    "[网关] 深判预算已见底，没轮到：" + wantDeep.drop(i).joinToString("、") { it.id },
+                )
+                break
+            }
+            val r = guard(p, remain) { pp, rr -> invoke(pp, rr, true) }
             if (r?.optBoolean("takeOver") == true) return p
         }
         return null

@@ -53,7 +53,7 @@ class AspectBusTest {
         val a = manifest("a", hooks = listOf("route"))
         val b = manifest("b", hooks = listOf("route"))
         val seen = ArrayList<String>()
-        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 1_000) { p, _ ->
+        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 1_000) { p, _, _ ->
             seen += p.id
             if (p.id == a.id) throw IllegalStateException("插件炸了")
             takeOver()
@@ -91,17 +91,88 @@ class AspectBusTest {
     }
 
     @Test
-    fun `预算耗尽后不再叫醒剩下的处理器`() = runBlocking {
+    fun `route 预算被前面的处理器吃光时 后面的仍能靠保底被问到`() = runBlocking {
+        // 真机教训：App 刚起来主线程还在渲染，排第一的插件一次 WebView 往返就吃掉整个 route 预算，
+        // 排在后面的插件永远轮不到 —— 「开 App 说的第一句话丢接管」就是这么来的。漏接管比多等
+        // 几十毫秒贵得多，所以预算见底后还要逐个补问一遍。
         val a = manifest("a", hooks = listOf("route"))
         val b = manifest("b", hooks = listOf("route"))
         val seen = ArrayList<String>()
-        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 60) { p, remain ->
+        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 60) { p, remain, _ ->
             seen += p.id
-            assertTrue("处理器拿到的应是剩余预算而不是总预算", remain <= 60)
-            delay(80)          // 第一个就把预算吃光
+            assertTrue("处理器拿到的应是剩余预算而不是总预算", remain <= AspectBus.COLD_ROUNDTRIP_MS)
+            if (p.id == a.id) { delay(80); null } else takeOver()   // 第一个就把预算吃光
+        }
+        assertEquals(listOf(a.id, b.id), seen)   // b 靠保底被问到了
+        assertEquals(b.id, winner?.id)
+    }
+
+    @Test
+    fun `保底也用尽后 才真的不再叫醒`() = runBlocking {
+        val a = manifest("a", hooks = listOf("route"))
+        val b = manifest("b", hooks = listOf("route"))
+        val seen = ArrayList<String>()
+        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 60) { p, _, _ ->
+            seen += p.id
+            delay(AspectBus.ROUTE_GRACE_MS + 100)   // 连保底期也吃穿
             null
         }
-        assertEquals(listOf(a.id), seen)   // b 根本没被叫醒
+        assertEquals(listOf(a.id), seen)
+        assertNull(winner)
+    }
+
+    // ---------- route 两段式判定（§6.2）：快判定拿不准 → 独立预算的深判 ----------
+
+    @Test
+    fun `快判定返回 deep 时 用独立预算再问一遍 且这一遍带 deep 标记`() = runBlocking {
+        val a = manifest("a", hooks = listOf("route"))
+        val calls = ArrayList<Pair<String, Boolean>>()
+        val winner = AspectBus.routeUntilTakeOver(listOf(a), 150, 3_000) { p, _, deep ->
+            calls += p.id to deep
+            if (deep) takeOver() else JSONObject().put("deep", true)
+        }
+        assertEquals(listOf(a.id to false, a.id to true), calls)
+        assertEquals(a.id, winner?.id)
+    }
+
+    @Test
+    fun `第一遍已经有人接管 就不再进深判`() = runBlocking {
+        // 深判是实打实的一秒多（一次 llm.classify），已经判明白了就不该再花
+        val a = manifest("a", hooks = listOf("route"))
+        val b = manifest("b", hooks = listOf("route"))
+        val calls = ArrayList<Pair<String, Boolean>>()
+        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 150, 3_000) { p, _, deep ->
+            calls += p.id to deep
+            if (p.id == a.id) JSONObject().put("deep", true) else takeOver()
+        }
+        assertEquals(listOf(a.id to false, b.id to false), calls)   // 没有任何 deep=true 的调用
+        assertEquals(b.id, winner?.id)
+    }
+
+    @Test
+    fun `没给深判预算时 deep 申请被忽略`() = runBlocking {
+        val a = manifest("a", hooks = listOf("route"))
+        val calls = ArrayList<Boolean>()
+        val winner = AspectBus.routeUntilTakeOver(listOf(a), 150) { _, _, deep ->
+            calls += deep
+            JSONObject().put("deep", true)
+        }
+        assertEquals(listOf(false), calls)
+        assertNull(winner)
+    }
+
+    @Test
+    fun `深判也吃预算 排在后面的申请者预算见底就不派`() = runBlocking {
+        val a = manifest("a", hooks = listOf("route"))
+        val b = manifest("b", hooks = listOf("route"))
+        val deepSeen = ArrayList<String>()
+        val winner = AspectBus.routeUntilTakeOver(listOf(a, b), 1_000, 60) { p, _, deep ->
+            if (!deep) return@routeUntilTakeOver JSONObject().put("deep", true)
+            deepSeen += p.id
+            delay(80)      // 第一个深判就把深判预算吃光
+            null
+        }
+        assertEquals(listOf(a.id), deepSeen)   // b 的深判根本没被叫醒
         assertNull(winner)
     }
 
@@ -111,7 +182,7 @@ class AspectBusTest {
         var propagated = false
         try {
             runBlocking {
-                AspectBus.routeUntilTakeOver(listOf(a), 1_000) { _, _ -> throw CancellationException("请求断了") }
+                AspectBus.routeUntilTakeOver(listOf(a), 1_000) { _, _, _ -> throw CancellationException("请求断了") }
             }
         } catch (e: CancellationException) {
             propagated = true

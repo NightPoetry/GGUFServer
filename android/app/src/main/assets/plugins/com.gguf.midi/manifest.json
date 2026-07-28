@@ -1,9 +1,9 @@
 {
   "id": "com.gguf.midi",
   "name": "乐句",
-  "version": "1.2.9",
+  "version": "1.3.2",
   "apiVersion": 1,
-  "description": "让模型作曲：可点情绪（悲伤/欢快/安静…，乐理由插件把住），说「再来一段」就同调同速地接着长——片段+编排、多轨乐器、端上合成，完全离线",
+  "description": "让模型作曲：可点情绪（悲伤/欢快/安静…），说「再来一段」同调同速接着长；卡片可播放，消息角标可把乐句导出成 .mid 存进「下载」",
   "author": "gguf",
   "entry": {
     "ui": "ui.html",
@@ -18,13 +18,16 @@
     "chat:route",
     "chat:annotate",
     "chat:card",
-    "chat:context"
+    "chat:context",
+    "chat:action",
+    "files:save"
   ],
   "hooks": [
     "route",
     "handle",
     "curate",
-    "tool"
+    "tool",
+    "messageAction"
   ],
   "tools": [
     {
@@ -33,5 +36,15 @@
       "input": "text"
     }
   ],
-  "systemClause": "- 作曲：用户要旋律/曲子/伴奏/背景音乐时直接写给他，别说自己不懂音乐。"
+  "systemClause": "- 作曲：用户要旋律/曲子/伴奏/背景音乐时直接写给他，别说自己不懂音乐。",
+  "messageActions": [
+    {
+      "id": "midi.download",
+      "label": "下载",
+      "icon": "download.png",
+      "roles": [
+        "assistant"
+      ]
+    }
+  ]
 }

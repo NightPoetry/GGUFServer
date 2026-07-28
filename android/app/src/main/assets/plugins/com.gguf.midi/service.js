@@ -341,24 +341,46 @@
   // 用户在要求音乐/旋律时才露。教学条款约 120 token，露多了既费预算又给 1B「手痒乱调」的机会；
   // 漏了则用户要曲子却拿不到工具——按 §6.14 的取向（recall 优先），这里判得稍宽一点。
   // `.{0,8}` 而不是 `.{0,4}`：「写首 C 大调的小曲子」「来首 C 大调的小曲子」里隔了 7 个字（实测漏判）。
-  // **真机漏判修正（2026-07-27）**：用户说「帮我写一个悲伤的调」时既没接管也没露工具，模型只能
-  // 自己发挥去反问「你想要什么风格」——因为原正则只认「曲/旋律/乐句」，**不认「调」**（曲调/调子）。
-  // 这是我自己写语料时没想到的说法（又一次过拟合的教训）。同时补：谱/伴奏/背景音乐/BGM/主旋律。
-  // 「调」必须挡掉它的一堆非音乐义（调用/调整/调试/调查/空调/语调…），所以带否定预查。
+  // **不再逐条枚举「动词+名词」，改成叉乘**（2026-07-28 第三次栽在同一件事上之后）：
+  // 手写枚举总会漏掉最朴素的说法——先漏「调」（帮我写一个悲伤的调），再漏「音乐」
+  // （帮我写个欢快的音乐🎵：`写…` 分支的宾语集合里偏偏没有「音乐」，于是模型自己去写了个 HTML 播放器）。
+  // 现在是「要一段东西的动词」×「音乐类名词」，中间允许十个字以内的定语。
+  var MK_VERB = '(?:写|来|作|谱|编|生成|整|弄|搞|做|创作|给我(?:来|写|整|弄)?)';
   var TUNE = '调(?!用|整|试|查|节|度|侃|剂|研|配|色|味|料|停|派|职|岗|价|息|解|和|皮|教|养|理|动|换|来|走|回)';
+  var MK_NOUN = '(?:曲子?|歌(?:曲|儿)?|旋律|乐句|音乐|伴奏|主旋律|melody|bgm|' + TUNE + '子?)';
+  // 挡掉「写个音乐播放器/音乐软件/…的代码」这类**要程序不是要曲子**的请求（否则整轮被劫持）
+  var CODE_CTX = /播放器|软件|网站|网页|代码|程序|脚本|应用|app|html|页面|接口|界面|组件|插件|库|框架/i;
   var musicRe = new RegExp(
-    '作曲|谱[一段个首]{0,2}.{0,4}(?:曲|子|' + TUNE + ')|编[一段个]?曲|即兴|钢琴曲|主题曲|背景音乐|bgm|midi'
-    + '|写[一段个首]{0,2}.{0,8}(?:曲|旋律|乐句|melody|' + TUNE + '|伴奏|主旋律)'
-    + '|来[一段个首]{0,2}.{0,8}(?:曲|旋律|音乐|乐句|' + TUNE + ')'
-    + '|生成.{0,4}(?:音乐|旋律|伴奏)|配[个段]?(?:旋律|伴奏|曲)|哼[一段个]|弹[一段个首]'
-    + '|听.{0,3}(?:曲|旋律)', 'i');
-  // 「使用工具」这类祈使：本身不含音乐词，但在**刚出过乐句的会话**里就是「用你那个作曲工具」。
-  // 与续写同一道门（见下面 pieceSessions），所以不会在别的语境里劫持。
-  var toolHintRe = /用(?:一下)?(?:这个|那个|你的)?工具|使用工具|调用工具|用插件|用那个插件/;
+    '作曲|即兴|钢琴曲|主题曲|背景音乐|bgm|midi|哼[一段个]|弹[一段个首]'
+    + '|' + MK_VERB + '[^。！？\\n]{0,10}' + MK_NOUN
+    + '|配[个段]?(?:旋律|伴奏|曲)|听.{0,3}(?:曲|旋律)', 'i');
   // 否定闸门：在**谈论**音乐/工具本身，不是在要一段（同 route 那条教训：别把谈论当成指令）
   var talkRe = /怎么用|如何使用|原理|为什么|支持哪些|能不能导出|什么格式|midi 是什么|midi是什么/i;
 
-  function wantsMusic(t) { return !talkRe.test(t) && musicRe.test(t); }
+  // ---- 两段式判定的分层（§6.2，2026-07-28）----
+  //
+  // 关键字判定有个躲不掉的天花板：**枚举补不完**（这个插件为「写…音乐」栽过三次），而一放宽就
+  // 反过来劫持「写个音乐播放器」。所以不再指望一条正则同时做到高召回和高精度，改成分工：
+  //
+  // - **高置信**（HIGH）：说法本身已经排除歧义（作曲/编曲/写段旋律/伴奏…）→ 直接接管，零成本。
+  // - **拿不准**（SOFT）：句子里有音乐词，但可能是在聊音乐、可能是要程序（「音乐」「歌」歧义最大）
+  //   → 申请深判，交给 llm.classify 定夺。慢约 1.1s，只发生在这些轮次上。
+  // - 都不命中 → 不接管，一分钱不花（绝大多数轮次走这条）。
+  //
+  // 歧义小的名词（旋律/乐句/伴奏/曲子/调子）留在 HIGH；歧义大的（音乐/歌）只进 SOFT。
+  var HIGH_NOUN = '(?:曲子?|旋律|乐句|伴奏|主旋律|melody|' + TUNE + '子?)';
+  var highRe = new RegExp(
+    '作曲|编曲|即兴|钢琴曲|主题曲|背景音乐|bgm|midi|哼[一段个]|弹[一段个首]'
+    + '|' + MK_VERB + '[^。！？\\n]{0,10}' + HIGH_NOUN
+    + '|配[个段]?(?:旋律|伴奏|曲)', 'i');
+  // 宽召回门闸：**只管有没有音乐味，不管是不是在要曲子**——精度交给 LLM，别再手写例外了。
+  var softRe = /音乐|歌|曲|旋律|乐句|伴奏|和弦|节奏|melody|midi|bgm|钢琴|吉他|谱/i;
+
+  // 「使用工具」这类祈使：本身不含音乐词，但在**刚出过乐句的会话**里就是「用你那个作曲工具」。
+  // 与续写同一道门（pieceSessions），所以不会在别的语境里劫持。
+  var toolHintRe = /用(?:一下)?(?:这个|那个|你的)?工具|使用工具|调用工具|用插件|用那个插件/;
+
+  function wantsMusic(t) { return !talkRe.test(t) && !CODE_CTX.test(t) && musicRe.test(t); }
 
   gguf.hooks.curate(function (turn) {
     var t = String((turn && turn.text) || '');
@@ -394,13 +416,41 @@
   }
   function isPieceSession(sid) { return !!(sid && pieceSessions[sid]); }
 
+  /**
+   * 深判：关键字已经命中，问一次模型「他到底是不是要我写一段曲子」。
+   *
+   * 走 `llm.classify`（前缀扩展单选判断，与本轮回答共用上文 KV）。turn.messages 原样透传是铁律——
+   * 判断只在末尾追加指令，绝不改动前面的消息，否则缓存全废。
+   * fail-open 的方向按 route 的纪律选：**判不出来就不接管**（precision 第一，宁可漏；
+   * 漏了模型自己还能答，误接管则是整轮被替换）。
+   */
+  function deepJudge(turn) {
+    if (!gguf.llm || !gguf.llm.classify) return Promise.resolve({});
+    return gguf.llm.classify({
+      messages: (turn && turn.messages) || [],
+      // **问「是哪一类」而不是「是不是作曲」**：二选一的是非题上，模型答什么全看选项怎么排；
+      // 换成语义彼此分离的四类（第一个字就不同）之后判得准多了——真机 Qwen3.5-2B 六条对五条。
+      question: '用户对助手说了一句话。他想要的是哪一类？只回答一个词。',
+      labels: ['代码', '旋律', '闲聊', '知识'],
+    }).then(function (r) {
+      return { takeOver: !!(r && r.label === '旋律') };
+    }).catch(function () { return {}; });
+  }
+
   gguf.hooks.route(function (turn) {
     var t = String((turn && turn.text) || '');
     var sid = turn && turn.sessionId;
-    if (wantsMusic(t)) return { takeOver: true };
+    // 第二遍（宿主给了独立预算）：这里才允许调 LLM
+    if (turn && turn.deep) return deepJudge(turn);
+
+    // 第一遍：只跑正则，150ms 预算内必须返回
+    if (talkRe.test(t)) return {};                                  // 在谈论音乐/工具本身，不是在要一段
+    if (highRe.test(t) && !CODE_CTX.test(t)) return { takeOver: true };
     // **续写只在这个会话刚出过乐句时才接管**：「再来一段」在别的语境里是「再写一段文章/故事」，
     // 无条件接管就是劫持整轮（§6.2 route 的第一纪律：precision 优先，宁可漏）。
     if ((contRe.test(t) || toolHintRe.test(t)) && isPieceSession(sid)) return { takeOver: true };
+    // 有音乐味但拿不准（含「高置信说法 + 代码语境」这种复合句：「给我的播放器写段背景音乐」）
+    if (softRe.test(t)) return { deep: true };
     return {};
   });
 
@@ -718,4 +768,117 @@
       gguf.events.broadcast('midi-updated', null);
     }).catch(function () { /* storage 不可用不影响出卡片 */ });
   }
+
+  // ============================== 导出 .mid（标准 MIDI 文件）==============================
+  //
+  // 之前一直标注「不导出 .mid，因为 WebView 里存二进制没有好通道」——现在宿主补了
+  // `gguf.files.saveDownload`（§6.15），通道有了，就该把这件事补上：音符模型本来就是 MIDI 语义
+  // （音高 0–127、力度、以 tick 计时长），编码成 SMF 只是把它写成字节。
+  //
+  // 格式：SMF format 1，division = TPQ；轨 0 只放速度元事件，其余每轨一个 GM 音色 + 音符。
+  var GM = { piano: 0, bell: 9, pluck: 45, strings: 48, bass: 32 };
+
+  function vlq(n) {                                   // MIDI 的变长整数
+    var bytes = [n & 0x7f];
+    n >>= 7;
+    while (n > 0) { bytes.unshift((n & 0x7f) | 0x80); n >>= 7; }
+    return bytes;
+  }
+  function be(n, len) {
+    var out = [];
+    for (var i = len - 1; i >= 0; i--) out.push((n >> (i * 8)) & 0xff);
+    return out;
+  }
+  function chunk(tag, body) {
+    var out = [];
+    for (var i = 0; i < tag.length; i++) out.push(tag.charCodeAt(i));
+    return out.concat(be(body.length, 4), body);
+  }
+  function trackBody(notes, channel, program, name) {
+    var evts = [];                                    // {t, bytes}
+    for (var i = 0; i < name.length; i++) { /* 轨名在下面单独写 */ }
+    var nameBytes = [];
+    for (i = 0; i < name.length; i++) nameBytes.push(name.charCodeAt(i) & 0x7f);
+    var body = [].concat(vlq(0), [0xff, 0x03], vlq(nameBytes.length), nameBytes,   // 轨名
+                         vlq(0), [0xc0 | channel, program & 0x7f]);                // 音色
+    for (i = 0; i < notes.length; i++) {
+      var n = notes[i];
+      evts.push({ t: n.start, b: [0x90 | channel, n.midi & 0x7f, Math.max(1, Math.min(127, n.vel || 90))] });
+      evts.push({ t: n.start + n.dur, b: [0x80 | channel, n.midi & 0x7f, 0] });
+    }
+    evts.sort(function (a, b) { return a.t - b.t || (a.b[0] & 0xf0) - (b.b[0] & 0xf0); });
+    var last = 0;
+    for (i = 0; i < evts.length; i++) {
+      body = body.concat(vlq(evts[i].t - last), evts[i].b);
+      last = evts[i].t;
+    }
+    return body.concat(vlq(0), [0xff, 0x2f, 0x00]);   // End of Track
+  }
+
+  /** 乐句 → 标准 MIDI 文件的 base64（给 gguf.files.saveDownload）。 */
+  function toSmfBase64(piece) {
+    var tracks = piece.tracks && piece.tracks.melody
+      ? piece.tracks
+      : { melody: piece.melody || [], bass: piece.bass || [], pad: [] };
+    var inst = piece.inst || { melody: 'piano', bass: 'bass', pad: 'strings' };
+    var tpq = piece.tpq || 480;
+    var usPerQuarter = Math.round(60000000 / (piece.tempo || 92));
+    var head = [].concat(vlq(0), [0xff, 0x51, 0x03], be(usPerQuarter, 3),
+                         vlq(0), [0xff, 0x2f, 0x00]);
+    var bodies = [chunk('MTrk', head)];
+    var order = ['melody', 'bass', 'pad'], ch = 0;
+    for (var i = 0; i < order.length; i++) {
+      var name = order[i], notes = tracks[name] || [];
+      if (!notes.length) continue;
+      var prog = GM[inst[name]] != null ? GM[inst[name]] : (name === 'bass' ? 32 : 0);
+      bodies.push(chunk('MTrk', trackBody(notes, ch, prog, name)));
+      ch = (ch + 1) % 16;
+    }
+    var mthd = chunk('MThd', [].concat(be(1, 2), be(bodies.length, 2), be(tpq, 2)));
+    var all = mthd;
+    for (i = 0; i < bodies.length; i++) all = all.concat(bodies[i]);
+    var bin = '';
+    for (i = 0; i < all.length; i++) bin += String.fromCharCode(all[i] & 0xff);
+    return (typeof btoa === 'function' ? btoa(bin) : Buffer.from(bin, 'binary').toString('base64'));
+  }
+
+  function fileNameFor(piece) {
+    var d = new Date(piece.postedAt || Date.now());
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    // 调号本身可能已经带 m/小调（Am），别再补一个（曾出现「Amm」）
+    var key = String(piece.key || 'C').replace(/\s+/g, '');
+    if (piece.minor && !/m|min|小调/i.test(key)) key += 'm';
+    return '乐句-' + key + '-' + piece.tempo + 'bpm-'
+      + p(d.getMonth() + 1) + p(d.getDate()) + p(d.getHours()) + p(d.getMinutes()) + '.mid';
+  }
+
+  // ============================== 消息角标：下载这段乐句 ==============================
+  //
+  // 与朗读插件同一个位置（消息下方的复制/朗读那一行）。角标是**静态声明**的，每条助手消息都会有，
+  // 所以点在非乐句消息上时要说明白，而不是默不作声。
+  gguf.hooks.messageAction(function (payload) {
+    if (!payload || payload.actionId !== 'midi.download') return {};
+    var text = String((payload.message && payload.message.content) || '');
+    if (text.indexOf('🎵 乐句') < 0) {
+      gguf.ui.toast('这条不是乐句，没什么可下载的');
+      return {};
+    }
+    return gguf.storage.get('recent').then(function (list) {
+      var arr = Array.isArray(list) ? list : [];
+      var hit = null;
+      for (var i = 0; i < arr.length; i++) {
+        if (String(arr[i].text || '').trim() === text.trim()) { hit = arr[i]; break; }
+      }
+      if (!hit) {
+        gguf.ui.toast('这段乐句不在最近记录里（只留最近 12 段）');
+        return {};
+      }
+      return gguf.files.saveDownload({
+        name: fileNameFor(hit), mime: 'audio/midi', base64: toSmfBase64(hit),
+      }).then(function () { return {}; }).catch(function (e) {
+        gguf.ui.toast('导出失败：' + ((e && e.message) || e));
+        return {};
+      });
+    }).catch(function () { gguf.ui.toast('读取最近乐句失败'); return {}; });
+  });
 })();

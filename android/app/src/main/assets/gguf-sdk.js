@@ -183,20 +183,37 @@
   gguf.host = gguf.host || {};
   gguf.host.models = function () { return callHost('host.models', {}); };
 
-  // 设置卡片自适应高度：把文档内容高度回报给宿主（宿主只在「设置卡片」消费，用来把卡片撑到内容高度，
-  // 避免固定高度把滑块等控件裁掉；面板 / 后台 WebView 的回报会被宿主忽略）。
+  // 设置卡片 / 消息卡片自适应高度：把内容高度回报给宿主（宿主据此把卡片撑到内容高度，
+  // 避免固定高度把滑块、钢琴卷帘等内容裁掉；面板 / 后台 WebView 的回报会被宿主忽略）。
+  //
+  // **量 body，不量 documentElement**（2026-07-28 修）：宿主会把 WebView 的高度设成上报值，
+  // 此后 `documentElement.scrollHeight` 至少等于视口高——被 WebView 自己撑着，于是「内容变矮」
+  // 永远报不回去，而且 documentElement 的尺寸不再变化、连 ResizeObserver 都不触发。真机现象：
+  // 长按乐句卡片展开看音符，把下面的「复制/朗读/下载」推下去；再收起时卡片不缩回，留一大块空白。
+  // body 是 block、高度由内容决定，缩得回去；它的 margin 不含在 rect 里，要单独加。
   (function () {
     var last = 0;
     function report() {
       try {
-        var el = document.documentElement, b = document.body;
-        var h = Math.ceil(Math.max(el ? el.scrollHeight : 0, b ? b.scrollHeight : 0));
+        var b = document.body;
+        if (!b) return;
+        var cs = window.getComputedStyle ? window.getComputedStyle(b) : null;
+        var m = cs ? (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) : 0;
+        var h = Math.ceil(b.getBoundingClientRect().height + m);
+        // 兜底：body 若被 CSS 撑成 0（比如子元素全 float/absolute），退回旧口径，别把卡片压没
+        if (h <= 0) h = Math.ceil(b.scrollHeight || 0);
         if (h > 0 && h !== last && window.__ggufHost && window.__ggufHost.reportHeight) {
           last = h; window.__ggufHost.reportHeight(h);
         }
       } catch (e) { /* ignore */ }
     }
-    try { if (window.ResizeObserver && document.documentElement) new ResizeObserver(report).observe(document.documentElement); } catch (e) {}
+    try {
+      if (window.ResizeObserver) {
+        var ro = new ResizeObserver(report);
+        var watch = function () { if (document.body) ro.observe(document.body); };
+        if (document.body) watch(); else document.addEventListener('DOMContentLoaded', watch);
+      }
+    } catch (e) {}
     document.addEventListener('DOMContentLoaded', report);
     window.addEventListener('load', report);
     setTimeout(report, 80); setTimeout(report, 300); setTimeout(report, 800);
@@ -237,6 +254,14 @@
       fetchAudio: function (opts) { return callHost('net.fetchAudio', opts || {}); },
     };
   }
+  if (granted['files:save']) {
+    // 把插件生成的二进制存进系统「下载」（§6.15）。opts: { name, base64, mime } → { ok, name, uri }
+    // 插件在 WebView 里算得出 .mid/.wav 的字节，却没有别的通道交给用户，只能经宿主落盘。
+    gguf.files = {
+      saveDownload: function (opts) { return callHost('files.saveDownload', opts || {}); },
+    };
+  }
+
   if (granted['chat:card']) {
     // 消息卡片（§6.12）：往当前会话插入一条由本插件 card 页渲染的消息。
     // opts: { file?: 'card.html', data?: {...} }；data.text 是卡片的「内部文本」

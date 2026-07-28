@@ -82,6 +82,51 @@ object PluginRuntime {
     /** 该插件此刻能不能接住一次 dispatch（service WebView 存在**且**已加载完）。 */
     fun isServiceReady(pluginId: String): Boolean =
         serviceViews.containsKey(pluginId) && serviceReady.contains(pluginId)
+
+    /** 曾经就绪过的插件。用来区分「App 刚起来的真冷启」与「WebView 被回收后正在重建」。 */
+    private val everReady = ConcurrentHashMap.newKeySet<String>()
+
+    /** WebView 已经建出来、但还没加载完 service.js —— 正在加载中，等一等就有。 */
+    private fun isServiceLoading(pluginId: String): Boolean =
+        serviceViews.containsKey(pluginId) && !serviceReady.contains(pluginId)
+
+    /**
+     * **就绪宽限**：service WebView 从建出来到加载完 service.js 有几百毫秒到几秒的窗口，而用户的
+     * 第一句话往往正落在这个窗口里。这段时间 route 拿不到接管——能力就在第一句话上丢了，且**没有
+     * 任何痕迹**（route 面对未就绪的插件直接跳过）。真机反复撞到：「给我生成悲伤的音乐」
+     * 「write a midi song」都退化成模型自己发挥。
+     *
+     * 所以在分发之前给一次有界等待。两类都要等，**但代价不同**（2026-07-28 补第二类）：
+     * - **真冷启**（从没就绪过）：App 刚起来，给足预算。一个插件只可能有一次「从没就绪过」。
+     * - **重建中**（曾就绪过、WebView 在但没加载完）：App 切后台再切回来，系统回收过 WebView。
+     *   这是**每次切前后台都会发生**的，但重建比冷启快得多，给一半预算。
+     *   真机 12:04 复现：从别的 App 切回来后第一句「write a midi song」没接管、第二句就接管了。
+     *
+     * 曾就绪过而 WebView **压根不存在**的不等：那是被销毁且 reconcile 还没补建，等也没谱。
+     */
+    suspend fun awaitColdStart(ids: List<String>, timeoutMs: Long) {
+        val cold = ids.filter { it !in everReady && !isServiceReady(it) }
+        val rebuilding = ids.filter { it in everReady && isServiceLoading(it) }
+        val waitFor = cold + rebuilding
+        if (waitFor.isEmpty()) {
+            ids.forEach { if (isServiceReady(it)) everReady.add(it) }
+            return
+        }
+        val budget = if (cold.isNotEmpty()) timeoutMs else timeoutMs / 2
+        val deadline = System.currentTimeMillis() + budget
+        while (System.currentTimeMillis() < deadline) {
+            if (waitFor.all { isServiceReady(it) }) break
+            kotlinx.coroutines.delay(25)
+        }
+        val waited = budget - (deadline - System.currentTimeMillis())
+        val late = waitFor.filter { !isServiceReady(it) }
+        ids.forEach { if (isServiceReady(it)) everReady.add(it) }
+        val what = if (cold.isNotEmpty()) "冷启" else "重建"
+        ServerBus.appendLog(
+            if (late.isEmpty()) "[网关] ${what}等待 ${waited}ms：${waitFor.size} 个插件的后台脚本已就绪，本轮照常参与"
+            else "[网关] ${what}等待 ${waited}ms 后仍未就绪：${late.joinToString("、")}（本轮它们不参与，能力可能缺席）",
+        )
+    }
     private val panelViews = ConcurrentHashMap<String, Held>()
     private val settingsViews = ConcurrentHashMap<String, Held>()
     /** 消息卡片 WebView，键 "<pluginId>#<cardKey>"（cardKey = 消息 id）。 */

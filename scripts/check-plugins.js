@@ -37,9 +37,14 @@ function loadService(pluginId) {
       set: (k, v) => { if (global.__store) global.__store[k] = v; return Promise.resolve(); },
       remove: noop, keys: () => Promise.resolve([]),
     },
-    llm: { chat: (o) => Promise.resolve(global.__llmReply ? { content: global.__llmReply } : {}), classify: noop },
+    llm: {
+      chat: (o) => Promise.resolve(global.__llmReply ? { content: global.__llmReply } : {}),
+      // 深判用（§6.2 两段式）：把调用参数留给断言看，标签由用例经 __classifyLabel 摆布
+      classify: (o) => { global.__classifyCall = o; return Promise.resolve({ label: global.__classifyLabel }); },
+    },
     card: { post: (o) => { global.__lastCard = o && o.data; } },
-    ui: { toast() {}, close() {}, setBadge() {} },
+    files: { saveDownload: (o) => { global.__saved = o; return Promise.resolve({ ok: true }); } },
+    ui: { toast: (t) => { global.__toast = t; }, close() {}, setBadge() {} },
     memllm: { ensure: noop, chat: noop, stop: noop, status: noop },
     tts: { speak: noop, stop: noop, status: noop },
     events: { on() {}, broadcast() {} },
@@ -549,6 +554,50 @@ function checkMidi() {
     ok(hooks.route({ sessionId: 'never', text: '再来一段' }).takeOver !== true,
       '从没出过乐句的会话不接管');
 
+    // ---- 两段式判定（§6.2）：快判定分流 → 深判由 LLM 定夺 ----
+    console.log('\n乐句 route 两段式判定：');
+    const ROUTE_SPLIT = [
+      // [说法, 期望分流, 为什么]
+      ['写一段悲伤的旋律', 'take', '高置信：动词+旋律'],
+      ['帮我作曲', 'take', '高置信：作曲'],
+      ['来首钢琴曲', 'take', '高置信：钢琴曲'],
+      ['write a midi song', 'take', '高置信：midi'],
+      ['帮我写一个悲伤的调', 'take', '高置信：调子（曾漏判）'],
+      ['帮我写个欢快的音乐🎵', 'deep', '★「音乐」歧义大，交给 LLM（曾误判成写播放器）'],
+      ['写个音乐播放器', 'deep', '★有音乐味但像要程序，交给 LLM'],
+      ['这首歌真好听', 'deep', '★在聊音乐，交给 LLM'],
+      ['给我的播放器写段背景音乐', 'deep', '★高置信说法 + 代码语境的复合句，别硬判'],
+      ['midi 是什么格式', 'none', '在问知识（谈论闸门先挡）'],
+      ['乐句插件怎么用', 'none', '在问用法'],
+      ['今天天气真不错', 'none', '毫无音乐味，一分钱不花'],
+      ['帮我写段排序代码', 'none', '同上'],
+    ];
+    for (const [text, want, why] of ROUTE_SPLIT) {
+      const r = hooks.route({ sessionId: 'split', text }) || {};
+      const got = r.takeOver === true ? 'take' : (r.deep === true ? 'deep' : 'none');
+      ok(got === want, `「${text}」→ ${got}${got === want ? '' : `（期望 ${want}）`}  # ${why}`);
+    }
+
+    // 深判分支：turn.deep 时才准调 LLM，且 messages 必须原样透传（KV 共用铁律）
+    global.__classifyCall = null; global.__classifyLabel = '旋律';
+    const msgs = [{ role: 'user', content: '帮我写个欢快的音乐' }];
+    const yes = await hooks.route({ sessionId: 'split', text: '帮我写个欢快的音乐', deep: true, messages: msgs });
+    ok(yes.takeOver === true, '深判判成「旋律」→ 接管');
+    ok(global.__classifyCall && global.__classifyCall.messages === msgs,
+      'classify 收到的 messages 是原样透传的那一份（前缀扩展铁律）');
+    ok(global.__classifyCall.labels.length === 4 && global.__classifyCall.labels.indexOf('代码') >= 0,
+      '深判问的是「哪一类」四选一（是非题上模型只会跟着选项顺序走）');
+    global.__classifyLabel = '代码';
+    const no = await hooks.route({ sessionId: 'split', text: '写个音乐播放器', deep: true, messages: msgs });
+    ok(no.takeOver !== true, '深判判成「代码」→ 不接管');
+    global.__classifyLabel = undefined;
+    const dunno = await hooks.route({ sessionId: 'split', text: '帮我写个欢快的音乐', deep: true, messages: msgs });
+    ok(dunno.takeOver !== true, '深判判不出来 → 不接管（route 的 fail-open 方向是宁可漏）');
+    // 快判定这一遍绝不许调 LLM：它是 150ms 的请求路径同步点
+    global.__classifyCall = null;
+    hooks.route({ sessionId: 'split', text: '帮我写个欢快的音乐' });
+    ok(global.__classifyCall === null, '快判定这一遍没有调 LLM（150ms 预算内只跑正则）');
+
     // 续写：同调同速同音色，新片段必须真被排进去（曾踩过「新片段定义了却没被演奏」）
     const c1 = sad.card;
     const cont = await runHandle(JSON.stringify({ patA: 'E5 D5 C5 - | B4 A4 G4 -', play: 'A A' }), '再来一段');
@@ -588,6 +637,63 @@ function checkMidi() {
 
     global.__llmReply = null; global.__store = null;
 
+      // ---- 导出 .mid：写出来的必须是**真能被 DAW 打开**的标准 MIDI 文件 ----
+    global.__recent = null;
+    const exportCard = await runHandle(JSON.stringify({
+      tempo: 96, key: 'Am', patA: 'A4 C5 E5 - | G4 B4 D5 -', patB: 'F4 A4 C5 -',
+      play: 'A A B A', inst: 'bell',
+    }), '写段悲伤的旋律', 'exp');
+    global.__store = null;
+    global.__recent = [exportCard.card];
+    // storage.get('recent') 要能读到，临时接管一下
+    const origGet = global.gguf.storage.get;
+    global.gguf.storage.get = (k) => Promise.resolve(k === 'recent' ? [exportCard.card] : undefined);
+    global.__saved = null;
+    await hooks.messageAction({ actionId: 'midi.download', sessionId: 'exp', message: { content: exportCard.card.text } });
+    global.gguf.storage.get = origGet;
+    ok(!!global.__saved, '点「下载」角标产出了文件');
+    if (global.__saved) {
+      const b = Buffer.from(global.__saved.base64, 'base64');
+      ok(/^乐句-Am-96?\d*bpm-\d+\.mid$/.test(global.__saved.name) || /\.mid$/.test(global.__saved.name),
+        `文件名像样（实得 ${global.__saved.name}）`);
+      ok(!/mm/.test(global.__saved.name), '调号不会重复带 m（曾出现「Amm」）');
+      ok(global.__saved.mime === 'audio/midi', 'mime 是 audio/midi');
+      ok(b.slice(0, 4).toString('ascii') === 'MThd', 'SMF 魔数正确');
+      const fmt = b.readUInt16BE(8), ntrk = b.readUInt16BE(10), div = b.readUInt16BE(12);
+      ok(fmt === 1 && div === exportCard.card.tpq, `format=1、division=${div} 与乐句 tpq 一致`);
+      // 正经解析：note-on / note-off 必须配平，末 tick 必须等于乐句长度
+      let p2 = 14, on = 0, off = 0, tempoUs = null, maxTick = 0;
+      for (let t = 0; t < ntrk; t++) {
+        p2 += 4; const len = b.readUInt32BE(p2); p2 += 4; const end = p2 + len;
+        let tick = 0, running = 0;
+        while (p2 < end) {
+          let d = 0, by; do { by = b[p2++]; d = (d << 7) | (by & 0x7f); } while (by & 0x80);
+          tick += d;
+          let st = b[p2];
+          if (st < 0x80) st = running; else { p2++; running = st; }
+          if (st === 0xff) {
+            const type = b[p2++]; let l = 0, c;
+            do { c = b[p2++]; l = (l << 7) | (c & 0x7f); } while (c & 0x80);
+            if (type === 0x51) tempoUs = (b[p2] << 16) | (b[p2 + 1] << 8) | b[p2 + 2];
+            p2 += l; if (type === 0x2f) break; continue;
+          }
+          const hi = st & 0xf0;
+          if (hi === 0xc0) p2 += 1;
+          else if (hi === 0x90) { const v = b[p2 + 1]; p2 += 2; if (v > 0) on++; else off++; }
+          else { if (hi === 0x80) off++; p2 += 2; }
+        }
+        maxTick = Math.max(maxTick, tick); p2 = end;
+      }
+      const notes = exportCard.card.tracks.melody.length + exportCard.card.tracks.bass.length;
+      ok(on === off && on === notes, `note-on/off 配平且等于音符数（on=${on} off=${off} 音符=${notes}）`);
+      ok(Math.round(60000000 / tempoUs) === exportCard.card.tempo,
+        `速度元事件 = ${Math.round(60000000 / tempoUs)} BPM，与乐句一致`);
+      ok(maxTick === exportCard.card.totalTicks, `末 tick=${maxTick} 与乐句 totalTicks 相等`);
+    }
+    global.__toast = null;
+    await hooks.messageAction({ actionId: 'midi.download', sessionId: 'exp', message: { content: '普通回复文字' } });
+    ok(/不是乐句/.test(global.__toast || ''), `点在非乐句消息上会说明白（实得「${global.__toast}」）`);
+
     console.log('\n乐句（com.gguf.midi）curate 快判定：');
   const CURATE = [
     ['写一段轻快的旋律', true, '显式'],
@@ -623,6 +729,16 @@ function checkMidi() {
     ['写个脚本把歌词按行分割', false, '是代码任务，不是作曲'],
     ['帮我写段代码统计小说里的词频', false, '同上'],
     ['音乐版权是怎么算的', false, '在问知识'],
+    // ↓ 真机第三次漏判：「写…」分支的宾语集合里没有「音乐」，模型于是自己去写了个 HTML 播放器
+    ['帮我写个欢快的音乐🎵', true, '★真机漏判：写…音乐'],
+    ['写一段音乐', true, '★写…音乐'],
+    ['给我整首歌', true, '★整…歌'],
+    ['创作一首歌', true, '★创作…歌'],
+    ['搞段旋律', true, '★搞…旋律'],
+    // ↓ 要程序不是要曲子，绝不能接管
+    ['写个音乐播放器', false, '★代码语境'],
+    ['帮我写一段播放音乐的代码', false, '★代码语境'],
+    ['做一个音乐网站', false, '★代码语境'],
   ];
   let fn = 0, fp = 0, tp = 0, tn = 0;
   for (const [text, want, why] of CURATE) {
