@@ -333,6 +333,6 @@ print(resp.choices[0].message.content)
 
 本项目基于 [Apache License 2.0](./LICENSE) 开源，另附加了强制署名条款
 （[ADDITIONAL_TERMS.md](./ADDITIONAL_TERMS.md)）：任何分发本项目源码、
-二进制产物或其衍生作品的产品，须在开发者名单中署名 "MaxX5"，并在公开
+二进制产物或其衍生作品的产品，须在开发者名单中署名 "NightPoetry"，并在公开
 介绍其开发团队的场合一并注明。仅通过网络调用本项目部署后暴露的 API
 不受此条款约束。完整署名要求见 [NOTICE](./NOTICE)。
