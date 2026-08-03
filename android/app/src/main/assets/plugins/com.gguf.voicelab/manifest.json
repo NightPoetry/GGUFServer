@@ -1,0 +1,24 @@
+{
+  "id": "com.gguf.voicelab",
+  "name": "定制音色",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "description": "接管发声的定制音色：内置离线神经推理（多音色 VITS，sid 选音色），或局域网推理服务（OpenAI 兼容 /v1/audio/speech、GPT-SoVITS /tts 音色克隆）；失败自动回退系统原声",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.4,
+    "topbar": false
+  },
+  "settingsCard": "settings.html",
+  "permissions": [
+    "cap:tts",
+    "net:lan"
+  ],
+  "provides": [
+    "tts"
+  ]
+}

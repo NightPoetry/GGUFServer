@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>简单变声</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .card { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 10px; background: var(--gg-card, #fff); padding: 10px 12px; }
+  .card p { margin: 4px 0; }
+  .muted { color: var(--gg-muted, #6B6557); font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--gg-accent, #C96442); margin: 8px 0 2px; }
+  .val { font-variant-numeric: tabular-nums; color: var(--gg-accent, #C96442); font-weight: 600; }
+  button {
+    margin-top: 10px; padding: 7px 14px; border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 8px; background: var(--gg-card, #fff); color: var(--gg-accent, #C96442);
+    font: inherit; font-size: 12.5px;
+  }
+  button:active { opacity: .6; }
+</style>
+</head>
+<body>
+  <h3>这是什么</h3>
+  <div class="card">
+    <p>音频级变声：接管发声后，先让系统引擎把文本合成为音频（不出声），
+       再用 Web Audio 变调播放。</p>
+    <p class="muted">引擎的音调参数在很多手机（含小米）上被忽略，改音色只能在音频上动手——
+       这条「合成 → 处理 → 播放」管道也是将来 RVC 音色插件（悠米、小火龙…）的原型：
+       把中间的处理步骤换成 RVC 模型推理即可。</p>
+  </div>
+
+  <h3>变声强度</h3>
+  <div class="card">
+    <p>音调 ×<span class="val" id="v">1.35</span></p>
+    <input type="range" id="rate" min="0.7" max="1.8" step="0.05" value="1.35">
+    <p class="muted">大于 1 变尖变快（花栗鼠），小于 1 低沉变慢；1.0 = 原声速率。</p>
+    <button id="test">试听变声</button>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var slider = document.getElementById('rate');
+  var label = document.getElementById('v');
+
+  gguf.storage.get('rate').then(function (v) {
+    if (typeof v === 'number') { slider.value = v; label.textContent = v.toFixed(2); }
+  }).catch(function () {});
+
+  slider.addEventListener('input', function () {
+    label.textContent = Number(slider.value).toFixed(2);
+  });
+  slider.addEventListener('change', function () {
+    gguf.storage.set('rate', Number(slider.value));
+  });
+
+  document.getElementById('test').addEventListener('click', function () {
+    var rate = Number(slider.value);
+    gguf.tts.synthesize('你好，这是变声后的效果测试。').then(function (r) {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      return fetch(r.url).then(function (x) { return x.arrayBuffer(); })
+        .then(function (buf) { return ctx.decodeAudioData(buf); })
+        .then(function (audio) {
+          var s = ctx.createBufferSource();
+          s.buffer = audio; s.playbackRate.value = rate;
+          s.connect(ctx.destination); s.start();
+        });
+    }).catch(function (e) { gguf.ui.toast('合成失败：' + e.message); });
+  });
+})();
+</script>
+</body>
+</html>

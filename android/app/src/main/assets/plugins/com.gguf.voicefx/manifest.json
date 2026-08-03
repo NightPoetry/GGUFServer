@@ -1,0 +1,22 @@
+{
+  "id": "com.gguf.voicefx",
+  "name": "简单变声",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "音频级变声验证：接管发声，引擎合成 WAV 后用 Web Audio 变调播放（RVC 类插件的管道原型）",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.4,
+    "topbar": false
+  },
+  "permissions": [
+    "cap:tts"
+  ],
+  "provides": [
+    "tts"
+  ]
+}

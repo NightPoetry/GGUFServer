@@ -1,0 +1,51 @@
+{
+  "id": "com.gguf.midi",
+  "name": "乐句",
+  "version": "1.3.6",
+  "apiVersion": 1,
+  "description": "让模型作曲：可点情绪（悲伤/欢快/安静…），说「再来一段」同调同速接着长；卡片可播放，消息角标可把乐句导出成 .mid 存进「下载」",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.42,
+    "topbar": true
+  },
+  "permissions": [
+    "llm",
+    "chat:route",
+    "chat:annotate",
+    "chat:card",
+    "chat:context",
+    "chat:action",
+    "files:save"
+  ],
+  "hooks": [
+    "route",
+    "handle",
+    "curate",
+    "tool",
+    "messageAction"
+  ],
+  "tools": [
+    {
+      "name": "midi.play",
+      "description": "把标签体里的编排脚本变成一条可播放的乐句消息。写法：第一行 tempo:100 key:Am；然后用 pat A: 与 pat B: 各定义一个片段（音名 C4 E4 G4 或简谱 1 2 3，一个音占一个八分拍，- 延长，0 休止，| 分小节）；最后 play: A A B A+12 A*2 给播放顺序（+n/-n 移调半音、*n 重复，靠它把 4 小节排成几十小节）。可选 inst: melody=piano（还可选 bell/pluck/strings/brass）与 mix: melody=0.9 bass=0.5。低音、铺底和声、鼓组节奏全部由插件自动配，不要自己写、也不用管。仅当用户要求作曲/旋律/音乐时使用",
+      "input": "text"
+    }
+  ],
+  "systemClause": "- 作曲：用户要旋律/曲子/伴奏/背景音乐时直接写给他，别说自己不懂音乐。",
+  "messageActions": [
+    {
+      "id": "midi.download",
+      "label": "下载",
+      "icon": "download.png",
+      "roles": [
+        "assistant"
+      ],
+      "requiresCard": true
+    }
+  ]
+}

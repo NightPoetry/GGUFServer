@@ -1,0 +1,126 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>简单记忆</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 不用 height:100% + flex 撑高（面板 WebView 在展开动画期间创建时，视口高度会固化在
+     动画中途的小值，页面就只剩一条、下面露出 html 白底）。自然文档流 + body 滚动最稳。 */
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 14px/1.65 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 10px 12px 6px;
+  }
+  .card {
+    background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 4px 14px;
+    font-size: 12px; color: var(--gg-muted, #6B6557);
+    padding-bottom: 10px; margin-bottom: 6px;
+    border-bottom: 1px solid var(--gg-line, #E7E3D8);
+  }
+  .meta b { color: var(--gg-fg, #2D2A26); font-weight: 600; }
+  .query {
+    width: 100%; margin-top: 2px;
+    font-size: 13px; color: var(--gg-fg, #2D2A26);
+    overflow-wrap: break-word;   /* 长词才断，正常按词/字换行，不再 break-all 硬折 */
+  }
+  .query .lbl { color: var(--gg-muted, #6B6557); }
+  .hit { padding: 10px 0; border-bottom: 0.6px solid var(--gg-line, #E7E3D8); }
+  .hit:last-child { border-bottom: none; }
+  .hit-top { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .who {
+    font-size: 11.5px; font-weight: 600;
+    color: var(--gg-accent, #C96442);
+  }
+  .score {
+    font-size: 10.5px; color: var(--gg-muted, #6B6557);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 999px; padding: 0 7px; line-height: 16px;
+  }
+  .line {
+    font-size: 13.5px; line-height: 1.7;
+    overflow-wrap: break-word; white-space: pre-wrap;   /* 完整展示，绝不截断 */
+  }
+  .empty { font-size: 13px; color: var(--gg-muted, #6B6557); padding: 6px 0; line-height: 1.7; }
+  .bar { padding: 7px 2px 0; font-size: 10.5px; color: var(--gg-muted, #6B6557); }
+</style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="empty">还没有召回记录。启用本插件后，当对话长到超出上下文窗口预算、旧消息被移出窗口时，
+    每次提问都会在这些旧消息里做一次关键词检索，把相关片段作为背景注入——这里展示最近一轮的检索结果。</div>
+  </div>
+  <div class="bar">只读调试视图 · 记录最近一轮检索了什么、命中了哪些片段</div>
+
+<script>
+(function () {
+  'use strict';
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    function p(n) { var s = String(n); return s.length < 2 ? '0' + s : s; }
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  function esc(s) {
+    var div = document.createElement('div');
+    div.textContent = String(s);
+    return div.innerHTML;
+  }
+
+  /** 命中行格式 "· 用户，M月d日 HH:mm 曾说：内容" → 拆出说话人徽标与正文，排版更清楚。 */
+  function splitLine(line) {
+    var m = /^·\s*([^：]{1,24}曾说)：([\s\S]*)$/.exec(String(line));
+    if (m) return { who: m[1], text: m[2] };
+    return { who: '', text: String(line) };
+  }
+
+  function render(rec) {
+    var card = document.getElementById('card');
+    if (!rec || typeof rec !== 'object') return;
+    var html =
+      '<div class="meta">' +
+        '<span>时间 <b>' + esc(fmtTime(rec.ts || 0)) + '</b></span>' +
+        '<span>来源 <b>' + esc(rec.source === 'external' ? '外部客户端' : '本机聊天') + '</b></span>' +
+        '<span>溢出 <b>' + esc(rec.droppedCount || 0) + '</b> 条</span>' +
+        '<span>耗时 <b>' + esc(rec.tookMs || 0) + '</b> 毫秒</span>' +
+        '<div class="query"><span class="lbl">检索词：</span>' + esc(rec.query || '（空）') + '</div>' +
+      '</div>';
+    var hits = Array.isArray(rec.hits) ? rec.hits : [];
+    if (!hits.length) {
+      html += '<div class="empty">这一轮没有命中任何片段（零注入，走完整缓存快路径）。</div>';
+    } else {
+      hits.forEach(function (h) {
+        var parts = splitLine(h.line);
+        html += '<div class="hit"><div class="hit-top">' +
+          (parts.who ? '<span class="who">' + esc(parts.who) + '</span>' : '') +
+          '<span class="score">相关度 ' + esc(h.score) + '</span></div>' +
+          '<div class="line">' + esc(parts.text) + '</div></div>';
+      });
+    }
+    card.innerHTML = html;
+  }
+
+  function refresh() {
+    gguf.storage.get('last-recall').then(function (rec) {
+      if (rec) render(rec);
+    }).catch(function () {});
+  }
+
+  gguf.events.on('show', refresh);
+  gguf.events.on('recall-updated', refresh);
+  refresh();
+})();
+</script>
+</body>
+</html>

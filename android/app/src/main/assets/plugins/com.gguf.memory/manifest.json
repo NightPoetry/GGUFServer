@@ -1,0 +1,30 @@
+{
+  "id": "com.gguf.memory",
+  "name": "简单记忆",
+  "version": "1.0.4",
+  "apiVersion": 1,
+  "description": "对话超出窗口后，用 BM25 检索被裁剪的旧消息，把相关回忆注入上下文（对外部客户端同样生效）",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.6
+  },
+  "permissions": [
+    "chat:read",
+    "chat:context",
+    "chat:external"
+  ],
+  "hooks": [
+    "context"
+  ],
+  "middleware": {
+    "scope": [
+      "local",
+      "external"
+    ],
+    "configurable": true
+  }
+}

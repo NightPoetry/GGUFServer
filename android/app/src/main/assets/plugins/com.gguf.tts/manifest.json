@@ -1,0 +1,44 @@
+{
+  "id": "com.gguf.tts",
+  "name": "朗读",
+  "version": "1.1.6",
+  "apiVersion": 1,
+  "description": "消息下方「朗读」角标点按发声；模型也可调用 tts.say 工具直接回一条自动播放的语音消息",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.4,
+    "topbar": false
+  },
+  "permissions": [
+    "chat:action",
+    "chat:annotate",
+    "chat:card",
+    "chat:context"
+  ],
+  "hooks": [
+    "messageAction",
+    "curate"
+  ],
+  "tools": [
+    {
+      "name": "tts.say",
+      "description": "把标签体里的话变成语音消息发给用户并自动播放。仅当用户明确要求「用语音说 / 读出来 / 发语音」时使用。标签体必须直接写你要说出口的原话本身（比如问候就写：你好呀！），绝不要写说明或转述",
+      "input": "text"
+    }
+  ],
+  "messageActions": [
+    {
+      "id": "tts.speak",
+      "label": "朗读",
+      "roles": [
+        "assistant",
+        "user"
+      ]
+    }
+  ],
+  "systemClause": "- 发语音：用户要「读出来/用语音说」时直接照做，别说自己不能发声。"
+}

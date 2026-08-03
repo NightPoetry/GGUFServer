@@ -1,0 +1,222 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提示词</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 自然文档流 + body 滚动：height:100% + flex 在面板 WebView 展开动画期间创建时
+     视口高度会固化在小值（见记忆插件同款问题），不要用。 */
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.55 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 10px 12px;
+  }
+  .card {
+    background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .section-title { font-size: 12px; color: var(--gg-muted, #6B6557); font-weight: 600; }
+
+  textarea {
+    width: 100%; min-height: 108px; resize: vertical;
+    border: 1px solid var(--gg-line, #E7E3D8); border-radius: 8px;
+    background: var(--gg-bg, #FAF9F5); color: var(--gg-fg, #2D2A26);
+    font: 13px/1.5 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 8px 10px; outline: none;
+  }
+  textarea:focus { border-color: var(--gg-accent, #C96442); }
+
+  .fillbtn {
+    align-self: flex-start;
+    border: 1px solid var(--gg-line, #E7E3D8); background: transparent;
+    color: var(--gg-accent, #C96442); border-radius: 6px;
+    font-size: 12px; padding: 4px 10px; cursor: pointer;
+  }
+
+  .radio-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; cursor: pointer; }
+  .radio-row input { margin-top: 3px; accent-color: var(--gg-accent, #C96442); flex: none; }
+  .radio-row .label { font-size: 13px; }
+  .radio-row .hint { font-size: 11px; color: var(--gg-muted, #6B6557); margin-top: 2px; }
+
+  .switch-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 7px 0; border-top: 0.6px solid var(--gg-line, #E7E3D8);
+  }
+  .switch-row:first-of-type { border-top: none; }
+  .switch-text .label { font-size: 13px; }
+  .switch-text .hint { font-size: 11px; color: var(--gg-muted, #6B6557); margin-top: 2px; }
+
+  .switch { position: relative; flex: none; width: 38px; height: 22px; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 11px;
+    background: var(--gg-line, #E7E3D8); transition: background .15s;
+  }
+  .switch .knob {
+    position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s;
+  }
+  .switch input:checked ~ .track { background: var(--gg-accent, #C96442); }
+  .switch input:checked ~ .knob { transform: translateX(16px); }
+
+  .bar { padding-top: 6px; font-size: 10.5px; color: var(--gg-muted, #6B6557); line-height: 1.5; }
+  .savedTag { color: var(--gg-accent, #C96442); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div>
+      <div class="section-title">提示词内容</div>
+      <div style="height:6px"></div>
+      <textarea id="text" placeholder="填一段系统提示词……"></textarea>
+      <div style="height:6px"></div>
+      <button class="fillbtn" id="fillSample">填入通用示例</button>
+    </div>
+
+    <div>
+      <div class="section-title">注入时机</div>
+      <label class="radio-row">
+        <input type="radio" name="mode" value="missing">
+        <span>
+          <div class="label">仅当请求没带系统提示词时注入（推荐）</div>
+          <div class="hint">客户端自己带了系统提示词就不打扰，只在对方没带时兜底。</div>
+        </span>
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="mode" value="always">
+        <span>
+          <div class="label">总是追加到系统提示词末尾</div>
+          <div class="hint">无论客户端有没有带系统提示词，都把这段内容拼进去。</div>
+        </span>
+      </label>
+    </div>
+
+    <div>
+      <div class="section-title">生效范围</div>
+      <div class="switch-row">
+        <div class="switch-text">
+          <div class="label">对外部客户端生效</div>
+          <div class="hint">局域网上用 OpenAI SDK / curl 调用本机 API 的请求。</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="applyExternal">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="switch-row">
+        <div class="switch-text">
+          <div class="label">对本机对话生效</div>
+          <div class="hint">本机聊天界面已经内置了提示词，通常不需要重复开启。</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="applyLocal">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="bar" id="statusBar">修改后下一轮请求生效；变更会让前缀缓存重建一次，之后恢复正常。</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var DEFAULT_TEXT = '你是一个可靠的中文助手。认真利用对话历史和给你的背景资料回答问题；用户自己说过的内容（如名字、喜好、日程）直接引用作答，不要以隐私或无法获取信息为由拒绝。';
+
+  function defaultConfig() {
+    return { text: DEFAULT_TEXT, mode: 'missing', applyExternal: true, applyLocal: false };
+  }
+
+  function normalizeConfig(v) {
+    var d = defaultConfig();
+    if (!v || typeof v !== 'object') return d;
+    return {
+      text: typeof v.text === 'string' ? v.text : d.text,
+      mode: v.mode === 'always' ? 'always' : 'missing',
+      applyExternal: typeof v.applyExternal === 'boolean' ? v.applyExternal : d.applyExternal,
+      applyLocal: typeof v.applyLocal === 'boolean' ? v.applyLocal : d.applyLocal,
+    };
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var saveTimer = null;
+  var loaded = false; // 首次 load 完成前，输入事件不触发保存（避免用初值覆盖 storage）
+
+  function readForm() {
+    var mode = 'missing';
+    var radios = document.getElementsByName('mode');
+    for (var i = 0; i < radios.length; i++) if (radios[i].checked) mode = radios[i].value;
+    return {
+      text: $('text').value,
+      mode: mode,
+      applyExternal: $('applyExternal').checked,
+      applyLocal: $('applyLocal').checked,
+    };
+  }
+
+  function fillForm(cfg) {
+    $('text').value = cfg.text;
+    var radios = document.getElementsByName('mode');
+    for (var i = 0; i < radios.length; i++) radios[i].checked = radios[i].value === cfg.mode;
+    $('applyExternal').checked = !!cfg.applyExternal;
+    $('applyLocal').checked = !!cfg.applyLocal;
+  }
+
+  function showSaved() {
+    $('statusBar').innerHTML = '<span class="savedTag">已保存</span> · 修改后下一轮请求生效；变更会让前缀缓存重建一次，之后恢复正常。';
+  }
+
+  function save() {
+    var cfg = normalizeConfig(readForm());
+    gguf.storage.set('config', cfg).then(function () {
+      showSaved();
+      gguf.events.broadcast('config-updated');
+    }).catch(function () {});
+  }
+
+  function scheduleSave() {
+    if (!loaded) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 800);
+  }
+
+  ['input', 'change'].forEach(function (evt) {
+    $('text').addEventListener(evt, scheduleSave);
+    $('applyExternal').addEventListener(evt, scheduleSave);
+    $('applyLocal').addEventListener(evt, scheduleSave);
+  });
+  var modeRadios = document.getElementsByName('mode');
+  for (var i = 0; i < modeRadios.length; i++) {
+    modeRadios[i].addEventListener('change', scheduleSave);
+  }
+
+  $('fillSample').addEventListener('click', function () {
+    $('text').value = DEFAULT_TEXT;
+    scheduleSave();
+  });
+
+  function refresh() {
+    return gguf.storage.get('config').then(function (v) {
+      var cfg = normalizeConfig(v);
+      fillForm(cfg);
+      loaded = true;
+    }).catch(function () {
+      fillForm(defaultConfig());
+      loaded = true;
+    });
+  }
+
+  gguf.events.on('show', refresh);
+  refresh();
+})();
+</script>
+</body>
+</html>

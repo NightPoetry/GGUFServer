@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>朗读</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .card { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 10px; background: var(--gg-card, #fff); padding: 10px 12px; }
+  .card p { margin: 4px 0; }
+  .muted { color: var(--gg-muted, #6B6557); font-size: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  button {
+    margin-top: 10px; padding: 7px 14px; border: 1px solid var(--gg-line, #E7E3D8);
+    border-radius: 8px; background: var(--gg-card, #fff); color: var(--gg-accent, #C96442);
+    font: inherit; font-size: 12.5px;
+  }
+  button:active { opacity: .6; }
+  /* 开关 */
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .knob {
+    position: absolute; inset: 0; border-radius: 22px; cursor: pointer;
+    background: var(--gg-line, #E7E3D8); transition: background .15s;
+  }
+  .knob::before {
+    content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    border-radius: 50%; background: #fff; transition: transform .15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,.25);
+  }
+  input:checked + .knob { background: var(--gg-accent, #C96442); }
+  input:checked + .knob::before { transform: translateX(18px); }
+</style>
+</head>
+<body>
+  <h3>用法</h3>
+  <div class="card">
+    <p>每条消息下方（复制旁）有「朗读」角标：点一下用系统语音朗读，再点同一条停止。</p>
+    <p class="muted">模型也会发语音：对它说「用语音回答」「把这句话读出来」，它会调用
+      tts.say 工具回一条语音消息气泡——点按播放/停止，长按展开文字。</p>
+    <button id="test">试听一句</button>
+    <button id="testCard">发一条测试语音消息</button>
+    <p class="muted" id="hint" style="display:none">没有声音？请检查系统「文字转语音」引擎与媒体音量。</p>
+  </div>
+
+  <h3>设置</h3>
+  <div class="card">
+    <div class="row">
+      <div>
+        <p>语音消息自动播放</p>
+        <p class="muted">模型发来语音消息时立即播放；关闭后需手动点气泡</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="autoplay" checked>
+        <span class="knob"></span>
+      </label>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  document.getElementById('test').addEventListener('click', function () {
+    document.getElementById('hint').style.display = '';
+    gguf.tts.speak('你好，这是本机的语音朗读测试。');
+  });
+
+  // 消息卡片桥路径（§6.12）的参考用法：往当前会话插一条语音消息卡片
+  document.getElementById('testCard').addEventListener('click', function () {
+    gguf.card.post({
+      data: { text: '这是一条测试语音消息。长按气泡可以展开这段文字，点按可以播放或停止。', postedAt: Date.now() },
+    }).then(function () { gguf.ui.close(); });
+  });
+
+  var box = document.getElementById('autoplay');
+  gguf.storage.get('autoplay').then(function (v) {
+    box.checked = v !== false; // 默认开
+  }).catch(function () {});
+  box.addEventListener('change', function () {
+    gguf.storage.set('autoplay', box.checked);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>外援设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    background: var(--gg-bg, #FAF9F5); color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; }
+  .hint { font-size: 11px; color: var(--gg-muted, #6B6557); line-height: 1.5; margin-top: 6px; }
+  .warn {
+    font-size: 11.5px; line-height: 1.6; margin: 8px 0 2px; padding: 9px 11px; border-radius: 8px;
+    background: rgba(201, 100, 66, .09); color: var(--gg-accent, #C96442);
+  }
+  input[type=text], input[type=password] {
+    width: 100%; margin-top: 6px; padding: 7px 9px; font: inherit; font-size: 12.5px;
+    color: var(--gg-fg, #2D2A26); background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8); border-radius: 7px;
+  }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .knob { position: absolute; inset: 0; border-radius: 11px; cursor: pointer;
+          background: var(--gg-line, #E7E3D8); transition: background .2s; }
+  .knob:before { content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%;
+                 left: 2px; top: 2px; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .switch input:checked + .knob { background: var(--gg-accent, #C96442); }
+  .switch input:checked + .knob:before { transform: translateX(18px); }
+  .saved { font-size: 11px; color: var(--gg-accent, #C96442); opacity: 0; transition: opacity .3s; }
+  .saved.on { opacity: 1; }
+  .stat { font-size: 11px; color: var(--gg-muted, #6B6557); font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .chip { font-size: 11.5px; padding: 4px 9px; border-radius: 999px; cursor: pointer;
+          border: 1px solid var(--gg-line, #E7E3D8); color: var(--gg-muted, #6B6557); }
+  .chip.on { border-color: var(--gg-accent, #C96442); color: var(--gg-accent, #C96442);
+             background: rgba(201, 100, 66, .08); }
+</style>
+</head>
+<body>
+  <div class="row">
+    <span><b>启用外援</b></span>
+    <label class="switch"><input type="checkbox" id="swOn"><span class="knob"></span></label>
+  </div>
+  <div class="warn">
+    打开后，插件发起的推理调用（作曲、判断、摘要…）会发到你填的端点——<b>这些内容会离开这台手机</b>。
+    本应用其余部分仍然完全在本机运行；你与模型的正常对话<b>不走</b>这里。
+  </div>
+
+  <h3>端点（OpenAI 兼容）</h3>
+  <input type="text" id="ep" placeholder="https://…/v1/chat/completions" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <input type="password" id="key" placeholder="API Key" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <input type="text" id="model" placeholder="模型名，例：gpt-4o-mini" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <div class="hint">
+    Key 存在本插件的私有存储里（明文，与插件数据同生命周期，卸载即删）。填局域网地址也可以——
+    比如家里另一台机器上的 llama-server，那样内容并不出家门。
+  </div>
+
+  <h3>谁走外援</h3>
+  <div class="chips" id="chips"></div>
+  <div class="hint">一个都不选 = 所有插件的推理都走外援。只按调用方筛，不去猜「这次难不难」。</div>
+
+  <h3>记录</h3>
+  <div class="row">
+    <span class="stat" id="stat">还没有调用</span>
+    <span class="saved" id="saved">已保存</span>
+  </div>
+  <div class="hint">
+    失败（超时、HTTP 错、认不出标签）一律**退回本机模型**再算一次，不会把这一轮弄丢。
+  </div>
+
+<script src="/gguf-sdk.js"></script>
+<script>
+(function () {
+  'use strict';
+  var KNOWN = [
+    ['com.gguf.midi', '乐句'],
+    ['com.gguf.notes', '便签'],
+    ['com.gguf.params', '参数导演'],
+    ['com.gguf.heavymem', '重型记忆'],
+    ['com.gguf.linemem', '线性记忆'],
+  ];
+  var cfg = { enabled: false, endpoint: '', apiKey: '', model: '', only: [], timeoutMs: 60000 };
+  var $ = function (id) { return document.getElementById(id); };
+  var savedTimer = null;
+
+  function flash() {
+    $('saved').classList.add('on');
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(function () { $('saved').classList.remove('on'); }, 1200);
+  }
+  function save() {
+    gguf.storage.set('cfg', cfg).then(function () {
+      gguf.events.broadcast('relay-cfg-changed', null);   // 让 service.js 丢掉缓存
+      flash();
+    });
+  }
+  function drawChips() {
+    var box = $('chips');
+    box.innerHTML = '';
+    KNOWN.forEach(function (p) {
+      var el = document.createElement('span');
+      el.className = 'chip' + (cfg.only.indexOf(p[0]) >= 0 ? ' on' : '');
+      el.textContent = p[1];
+      el.onclick = function () {
+        var i = cfg.only.indexOf(p[0]);
+        if (i >= 0) cfg.only.splice(i, 1); else cfg.only.push(p[0]);
+        drawChips(); save();
+      };
+      box.appendChild(el);
+    });
+  }
+
+  gguf.storage.get('cfg').then(function (v) {
+    if (v && typeof v === 'object') for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k)) cfg[k] = v[k];
+    $('swOn').checked = !!cfg.enabled;
+    $('ep').value = cfg.endpoint || '';
+    $('key').value = cfg.apiKey || '';
+    $('model').value = cfg.model || '';
+    if (!Array.isArray(cfg.only)) cfg.only = [];
+    drawChips();
+  });
+  gguf.storage.get('stat').then(function (s) {
+    if (!s) return;
+    $('stat').textContent = '外援接了 ' + (s.ok || 0) + ' 次 · 失败回落 ' + (s.fail || 0)
+      + ' 次 · 没接 ' + (s.skip || 0) + ' 次';
+  });
+
+  $('swOn').onchange = function () { cfg.enabled = this.checked; save(); };
+  ['ep', 'key', 'model'].forEach(function (id) {
+    var field = { ep: 'endpoint', key: 'apiKey', model: 'model' }[id];
+    $(id).onchange = function () { cfg[field] = this.value.trim(); save(); };
+  });
+})();
+</script>
+</body>
+</html>

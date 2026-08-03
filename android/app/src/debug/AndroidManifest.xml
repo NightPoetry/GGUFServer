@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  debug 源集专属 manifest：只在 debug 变体里合并进最终 AndroidManifest，release 完全不含
+  下面这个 receiver（既不编译、也不声明）。exported=true 是因为 adb shell（shell UID）需要
+  能从外部发广播打到它；只在本机通过数据线用 adb 触发，不担心被其它 App 滥用——这就是
+  它必须留在 debug-only 源集、绝不能出现在对外分发的正式包里的原因。见
+  android/app/src/debug/java/com/ggufserver/app/debug/DebugSynthReceiver.kt 的用法说明。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.DebugSynthReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="com.ggufserver.app.debug.SYNTH" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,352 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>乐句</title>
+<style>
+  /* 视觉语言与语音卡片（com.gguf.tts/card.html）保持一致：同一套 --gg-* 变量、同样的气泡圆角与
+     配色混合方式、同样的「点按 / 长按」提示行。差别在正文区多一条多轨钢琴卷帘与进度。 */
+  * { box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent; }
+  html, body { background: transparent; }
+  body {
+    color: var(--gg-fg, #2D2A26);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 2px 0 4px;
+  }
+  .bubble {
+    display: inline-block; min-width: 232px; max-width: 98%;
+    padding: 10px 13px 11px;
+    border-radius: 14px; border-top-left-radius: 5px;
+    background: color-mix(in srgb, var(--gg-accent, #C96442) 10%, var(--gg-card, #fff));
+    border: 1px solid color-mix(in srgb, var(--gg-accent, #C96442) 22%, transparent);
+  }
+  .head { display: flex; align-items: center; gap: 9px; }
+  .ico { width: 18px; height: 18px; flex: none; color: var(--gg-accent, #C96442); }
+  .meta { font-size: 12px; color: var(--gg-muted, #6B6557); min-width: 0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn { margin-left: auto; flex: none; width: 26px; height: 26px; border-radius: 50%;
+         display: flex; align-items: center; justify-content: center;
+         background: color-mix(in srgb, var(--gg-accent, #C96442) 16%, transparent);
+         color: var(--gg-accent, #C96442); }
+  .btn svg { width: 13px; height: 13px; }
+  .btn .pause { display: none; }
+  .playing .btn .play { display: none; }
+  .playing .btn .pause { display: block; }
+
+  /* 多轨钢琴卷帘：旋律用主色实条，低音/铺底用更淡的同色系；段落分界画细竖线 */
+  .roll { position: relative; height: 62px; margin-top: 9px; border-radius: 7px;
+          background: color-mix(in srgb, var(--gg-fg, #2D2A26) 4%, transparent);
+          overflow: hidden; }
+  .roll i { position: absolute; height: 4px; border-radius: 2px;
+            background: var(--gg-accent, #C96442); opacity: .85; }
+  .roll i.bass { background: color-mix(in srgb, var(--gg-accent, #C96442) 45%, var(--gg-muted, #6B6557));
+                 opacity: .5; height: 3px; }
+  .roll i.pad { background: color-mix(in srgb, var(--gg-accent, #C96442) 30%, var(--gg-muted, #6B6557));
+                opacity: .38; height: 3px; }
+  .roll i.on { opacity: 1; }
+  .roll s { position: absolute; top: 0; bottom: 0; width: 1px;
+            background: color-mix(in srgb, var(--gg-fg, #2D2A26) 10%, transparent); }
+  .ph { position: absolute; top: 0; bottom: 0; width: 1.5px; left: 0;
+        background: color-mix(in srgb, var(--gg-accent, #C96442) 60%, transparent); opacity: 0; }
+  .playing .ph { opacity: 1; }
+
+  .foot { display: flex; align-items: baseline; gap: 8px; margin-top: 7px; }
+  .arr { font-size: 11.5px; color: var(--gg-muted, #6B6557); min-width: 0;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+         font-family: ui-monospace, Menlo, monospace; }
+  .time { margin-left: auto; flex: none; font-size: 11.5px; color: var(--gg-muted, #6B6557);
+          font-family: ui-monospace, Menlo, monospace; }
+
+  .hint { font-size: 10.5px; color: var(--gg-muted, #6B6557); opacity: .75; margin: 5px 2px 0; }
+  .text {
+    display: none; margin-top: 8px; padding: 9px 12px;
+    border-radius: 10px; background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    font-size: 12.5px; line-height: 1.7; color: var(--gg-fg, #2D2A26);
+    -webkit-user-select: text; user-select: text;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .expanded .text { display: block; }
+</style>
+</head>
+<body>
+  <div class="bubble" id="bubble">
+    <div class="head">
+      <svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+      <span class="meta" id="meta">乐句</span>
+      <span class="btn" id="btn">
+        <svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <svg class="pause" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+      </span>
+    </div>
+    <div class="roll" id="roll"><span class="ph" id="ph"></span></div>
+    <div class="foot">
+      <span class="arr" id="arr"></span>
+      <span class="time" id="time">0:00</span>
+    </div>
+  </div>
+  <div class="text" id="text"></div>
+  <div class="hint" id="hint">点按播放 / 停止 · 长按看音符</div>
+
+<script>
+(function () {
+  'use strict';
+  var card = (window.__ggufCard || {});
+  var d = card.data || {};
+
+  // 1.0.x 存下的乐句只有 melody/bass 两个平铺数组，这里统一成多轨结构（老数据照样能播，
+  // 老数据没有 drums——留空数组，下面的调度/混音对空轨都是零开销的空循环）
+  var tracks = d.tracks && d.tracks.melody
+    ? { melody: d.tracks.melody || [], bass: d.tracks.bass || [], pad: d.tracks.pad || [], drums: d.tracks.drums || [] }
+    : { melody: d.melody || [], bass: d.bass || [], pad: [], drums: [] };
+  var inst = d.inst || { melody: 'piano', bass: 'bass', pad: 'strings' };
+  var mix = d.mix || { melody: 0.9, bass: 0.55, pad: 0.32 };
+  var tpq = d.tpq || 480, tempo = d.tempo || 92;
+  var barTicks = d.barTicks || tpq * 2;
+  var total = d.totalTicks || 1;
+  var secPerTick = 60 / tempo / tpq;
+  var totalSec = total * secPerTick;
+
+  var root = document.body, rollEl = document.getElementById('roll'), ph = document.getElementById('ph');
+  var timeEl = document.getElementById('time');
+
+  document.getElementById('text').textContent = String(d.text || '（空）');
+  document.getElementById('arr').textContent = d.arrange ? '编排 ' + d.arrange : '';
+  var bars = Math.max(1, Math.round(total / barTicks));
+  document.getElementById('meta').textContent =
+    (d.key || 'C') + (d.minor ? ' 小调' : ' 大调') + ' · ' + tempo + ' BPM · ' + bars + ' 小节'
+    + ' · ' + fmt(totalSec) + (d.mood ? ' · ' + d.mood : '');
+  timeEl.textContent = '0:00 / ' + fmt(totalSec);
+
+  function fmt(s) {
+    s = Math.max(0, Math.round(s));
+    return Math.floor(s / 60) + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+  }
+
+  // ---- 画卷帘（段落分界线 + 三轨音符） ----
+  var all = tracks.melody.concat(tracks.bass, tracks.pad);
+  var lo = 127, hi = 0;
+  all.forEach(function (n) { if (n.midi < lo) lo = n.midi; if (n.midi > hi) hi = n.midi; });
+  if (hi <= lo) hi = lo + 12;
+  var span = Math.max(12, hi - lo);
+  (d.sections || []).forEach(function (s, i) {
+    if (!i) return;
+    var sep = document.createElement('s');
+    sep.style.left = (s.start / total * 100) + '%';
+    rollEl.appendChild(sep);
+  });
+  // 音符太多时不做逐音高亮（几百个 DOM 每帧切 class 在手机上不划算），只走播放头
+  var lite = all.length > 200;
+  var els = [];
+  ['pad', 'bass', 'melody'].forEach(function (name) {
+    tracks[name].forEach(function (n) {
+      var el = document.createElement('i');
+      if (name !== 'melody') el.className = name;
+      el.style.left = (n.start / total * 100) + '%';
+      el.style.width = Math.max(0.6, (n.dur / total * 100) - 0.15) + '%';
+      el.style.bottom = (6 + (n.midi - lo) / span * 46) + 'px';
+      rollEl.appendChild(el);
+      if (!lite && name === 'melody') els.push({ el: el, n: n });
+    });
+  });
+
+  // ---- Web Audio：多乐器 + 逐轨混音 + 滚动预排（长曲子不一次性排几百个振荡器） ----
+  var AC = window.AudioContext || window.webkitAudioContext;
+  var ctx = null, chain = null, live = [], raf = null, sched = null;
+  var startedAt = 0, cursor = 0;          // cursor = 已排到的 tick
+  var LOOKAHEAD = 1.6;                    // 预排未来 1.6 秒
+
+  // 音色配方：全靠振荡器 + 包络，无采样、无外部资源（离线可用）
+  var VOICES = {
+    piano:   { osc: 'triangle', atk: 0.012, rel: 0.9,  amp: 0.22, harm: { type: 'sine', mul: 2.002, amp: 0.35, rel: 0.8 } },
+    bell:    { osc: 'sine',     atk: 0.004, rel: 1.6,  amp: 0.20, harm: { type: 'sine', mul: 3.01,  amp: 0.28, rel: 1.2 } },
+    pluck:   { osc: 'square',   atk: 0.003, rel: 0.35, amp: 0.14, harm: null },
+    strings: { osc: 'sawtooth', atk: 0.14,  rel: 1.2,  amp: 0.10, harm: null },
+    bass:    { osc: 'sine',     atk: 0.03,  rel: 1.0,  amp: 0.30, harm: null },
+    // 两层略微失谐的锯齿波（+7 音分）模拟铜管合奏的自然厚度，起音比 strings 快、比 pluck 慢
+    brass:   { osc: 'sawtooth', atk: 0.05,  rel: 0.6,  amp: 0.16, harm: { type: 'sawtooth', mul: 1.004, amp: 0.5, rel: 0.6 } },
+  };
+
+  function buildChain() {
+    var master = ctx.createGain();
+    master.gain.value = 0.9;
+    var lim = ctx.createDynamicsCompressor();   // 四轨叠加容易削顶，挂个软限幅
+    lim.threshold.value = -8; lim.knee.value = 12; lim.ratio.value = 6;
+    master.connect(lim); lim.connect(ctx.destination);
+    var buses = {};
+    ['melody', 'bass', 'pad'].forEach(function (t) {
+      var g = ctx.createGain();
+      g.gain.value = typeof mix[t] === 'number' ? mix[t] : 0.6;
+      g.connect(master);
+      buses[t] = g;
+    });
+    var drumBus = ctx.createGain();
+    drumBus.gain.value = 0.55;   // 鼓组不经 mix 配置——纯节奏层，模型不必也不该管它的音量
+    drumBus.connect(master);
+    buses.drums = drumBus;
+    return { master: master, buses: buses };
+  }
+
+  /** 噪声打击乐通用底：造一段白噪声、过滤成需要的音色、给一条指数衰减包络。 */
+  function noiseHit(when, dur, filterType, filterFreq, amp) {
+    var n = Math.max(1, Math.round(ctx.sampleRate * dur));
+    var buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) data[i] = Math.random() * 2 - 1;
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    var filt = ctx.createBiquadFilter();
+    filt.type = filterType; filt.frequency.value = filterFreq;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(amp, when);
+    g.gain.exponentialRampToValueAtTime(0.0008, when + dur);
+    src.connect(filt); filt.connect(g); g.connect(chain.buses.drums);
+    src.start(when); src.stop(when + dur + 0.01);
+    live.push(src);
+  }
+
+  /** 底鼓：正弦扫频（150Hz 快速滑到 45Hz）+ 短促衰减，纯振荡器不需要噪声。 */
+  function drumKick(when) {
+    var o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(150, when);
+    o.frequency.exponentialRampToValueAtTime(44, when + 0.11);
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.9, when);
+    g.gain.exponentialRampToValueAtTime(0.001, when + 0.22);
+    o.connect(g); g.connect(chain.buses.drums);
+    o.start(when); o.stop(when + 0.24);
+    live.push(o);
+  }
+
+  function drumHit(n, when) {
+    var vel = (n.vel || 90) / 127;
+    if (n.voice === 'kick') drumKick(when);
+    else if (n.voice === 'snare') noiseHit(when, 0.14, 'highpass', 1600, 0.55 * vel);
+    else if (n.voice === 'hihat') noiseHit(when, 0.05, 'highpass', 7500, 0.28 * vel);
+  }
+
+  function voice(n, when, trackName) {
+    var recipe = VOICES[inst[trackName]] || VOICES[trackName === 'bass' ? 'bass' : 'piano'];
+    var dur = Math.max(0.09, n.dur * secPerTick * recipe.rel);
+    var f = 440 * Math.pow(2, (n.midi - 69) / 12);
+    var amp = (n.vel || 90) / 127 * recipe.amp;
+    var bus = chain.buses[trackName] || chain.master;
+
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(amp, when + recipe.atk);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    g.connect(bus);
+    var o = ctx.createOscillator();
+    o.type = recipe.osc; o.frequency.value = f;
+    o.connect(g); o.start(when); o.stop(when + dur + 0.02);
+    live.push(o);
+
+    if (recipe.harm) {
+      var g2 = ctx.createGain();
+      g2.gain.setValueAtTime(0.0001, when);
+      g2.gain.exponentialRampToValueAtTime(amp * recipe.harm.amp, when + recipe.atk + 0.008);
+      g2.gain.exponentialRampToValueAtTime(0.0001, when + dur * recipe.harm.rel);
+      g2.connect(bus);
+      var o2 = ctx.createOscillator();
+      o2.type = recipe.harm.type; o2.frequency.value = f * recipe.harm.mul;
+      o2.connect(g2); o2.start(when); o2.stop(when + dur + 0.02);
+      live.push(o2);
+    }
+  }
+
+  /** 滚动预排：每 200ms 把「未来 LOOKAHEAD 秒内起音」的音符排进去，排过的不再排。 */
+  function pump() {
+    if (!ctx) return;
+    var horizon = (ctx.currentTime - startedAt + LOOKAHEAD) / secPerTick;   // tick
+    ['melody', 'bass', 'pad'].forEach(function (name) {
+      tracks[name].forEach(function (n) {
+        if (n.start >= cursor && n.start < horizon) voice(n, startedAt + n.start * secPerTick, name);
+      });
+    });
+    tracks.drums.forEach(function (n) {
+      if (n.start >= cursor && n.start < horizon) drumHit(n, startedAt + n.start * secPerTick);
+    });
+    cursor = Math.max(cursor, horizon);
+    // 已经播完的振荡器节点及时丢掉引用，长曲子不越攒越多
+    if (live.length > 400) live = live.slice(-200);
+  }
+
+  function tick() {
+    if (!ctx) return;
+    var el = (ctx.currentTime - startedAt) / totalSec;
+    if (el >= 1) { stop(); return; }
+    ph.style.left = (el * 100) + '%';
+    timeEl.textContent = fmt(el * totalSec) + ' / ' + fmt(totalSec);
+    if (!lite) {
+      var nowTicks = el * total;
+      els.forEach(function (x) {
+        x.el.classList.toggle('on', nowTicks >= x.n.start && nowTicks < x.n.start + x.n.dur);
+      });
+    }
+    raf = requestAnimationFrame(tick);
+  }
+
+  function play() {
+    if (!AC || !tracks.melody.length) { document.getElementById('hint').textContent = '这台设备不支持端上合成'; return; }
+    stop();
+    try { ctx = new AC(); } catch (e) { return; }
+    var go = function () {
+      chain = buildChain();
+      startedAt = ctx.currentTime + 0.08;
+      cursor = 0;
+      pump();
+      sched = setInterval(pump, 200);
+      root.classList.add('playing');
+      raf = requestAnimationFrame(tick);
+    };
+    if (ctx.state === 'suspended' && ctx.resume) {
+      ctx.resume().then(go).catch(function () {
+        document.getElementById('hint').textContent = '点按播放（系统拦了自动播放）';
+      });
+    } else go();
+  }
+
+  function stop() {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    if (sched) { clearInterval(sched); sched = null; }
+    live.forEach(function (o) { try { o.stop(); } catch (e) {} });
+    live = [];
+    if (ctx) { try { ctx.close(); } catch (e) {} ctx = null; }
+    chain = null; cursor = 0;
+    root.classList.remove('playing');
+    ph.style.left = '0%';
+    timeEl.textContent = '0:00 / ' + fmt(totalSec);
+    els.forEach(function (x) { x.el.classList.remove('on'); });
+  }
+
+  // ---- 交互：与语音卡片同构（点按播放/停止，长按展开） ----
+  var pressTimer = null, longFired = false;
+  var bubble = document.getElementById('bubble');
+  bubble.addEventListener('touchstart', function () {
+    longFired = false;
+    pressTimer = setTimeout(function () { longFired = true; root.classList.toggle('expanded'); }, 450);
+  }, { passive: true });
+  ['touchend', 'touchcancel', 'touchmove'].forEach(function (ev) {
+    bubble.addEventListener(ev, function () { clearTimeout(pressTimer); }, { passive: true });
+  });
+  bubble.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  bubble.addEventListener('click', function () {
+    if (longFired) { longFired = false; return; }
+    if (ctx) stop(); else play();
+  });
+
+  // ---- 自动播放：卡片「新鲜」（刚由工具/接管产生，而非滚动回来重建）且用户没关掉 ----
+  var fresh = d.postedAt && (Date.now() - d.postedAt) < 20000;
+  if (fresh) {
+    gguf.storage.get('autoplay').then(function (v) { if (v !== false) play(); })
+      .catch(function () { play(); });
+  }
+})();
+</script>
+</body>
+</html>

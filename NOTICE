@@ -1,0 +1,11 @@
+GGUF 服务器（Android）
+Copyright 2026 MaxX5
+
+本产品依据 Apache License, Version 2.0 授权（见 LICENSE 文件）。
+
+本项目在 Apache License 2.0 之外，另附加了强制署名条件，
+完整条款见本仓库根目录的 ADDITIONAL_TERMS.md，构成分发本作品
+及其衍生作品的前提条件之一。任何分发本 NOTICE 文件所附作品
+（或其衍生作品）源代码、目标代码或二进制产物的主体，依据
+Apache License 2.0 第 4(d) 条，须原样保留本 NOTICE 文件内容，
+并同时遵守 ADDITIONAL_TERMS.md 中规定的署名义务。

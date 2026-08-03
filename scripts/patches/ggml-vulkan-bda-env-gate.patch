@@ -1,0 +1,19 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 96d8994..3067c9a 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -6206,7 +6206,13 @@ static vk_device ggml_vk_get_device(size_t idx) {
+                             getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
+ 
+         device->shader_int64 = device_features2.features.shaderInt64;
+-        device->buffer_device_address = vk12_features.bufferDeviceAddress;
++        // Some drivers (e.g. Mali) advertise bufferDeviceAddress but do not export a usable
++        // vkGetBufferDeviceAddress entry point, so calling it dereferences a null fn-ptr and
++        // segfaults during backend init. Allow forcing the optimization off via env var; the
++        // backend falls back to descriptor-based buffer binding (bda_addr paths are all gated
++        // behind buffer_device_address, so this is functionally safe).
++        device->buffer_device_address = vk12_features.bufferDeviceAddress &&
++                                        getenv("GGML_VK_DISABLE_BDA") == nullptr;
+         device->vulkan_memory_model = vk12_features.vulkanMemoryModel;
+ 
+         if (device->subgroup_size_control) {

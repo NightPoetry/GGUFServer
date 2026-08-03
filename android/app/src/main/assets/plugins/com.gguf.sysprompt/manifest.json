@@ -1,0 +1,28 @@
+{
+  "id": "com.gguf.sysprompt",
+  "name": "提示词",
+  "version": "1.0.2",
+  "apiVersion": 1,
+  "description": "给经过本机 API 的请求注入系统提示词，外部客户端没带提示词时兜底",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.6
+  },
+  "permissions": [
+    "chat:context",
+    "chat:external"
+  ],
+  "hooks": [
+    "context"
+  ],
+  "middleware": {
+    "scope": [
+      "local",
+      "external"
+    ]
+  }
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>线性记忆设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--gg-bg, #FAF9F5); }
+  body {
+    min-height: 100%;
+    background: var(--gg-bg, #FAF9F5);
+    color: var(--gg-fg, #2D2A26);
+    font: 13.5px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 12px 14px 16px;
+  }
+  h3 { font-size: 11.5px; font-weight: 600; color: var(--gg-muted, #6B6557); letter-spacing: .04em; margin: 14px 2px 8px; }
+  h3:first-child { margin-top: 2px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .val { font-weight: 600; color: var(--gg-accent, #C96442); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin-top: 8px; accent-color: var(--gg-accent, #C96442); }
+  .hint { font-size: 11px; color: var(--gg-muted, #6B6557); line-height: 1.5; margin-top: 6px; }
+  .models { border: 1px solid var(--gg-line, #E7E3D8); border-radius: 8px; overflow: hidden; }
+  .m { display: flex; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: .6px solid var(--gg-line, #E7E3D8); }
+  .m:last-child { border-bottom: none; }
+  .m .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m .s { flex: none; color: var(--gg-muted, #6B6557); font-variant-numeric: tabular-nums; }
+  .empty { font-size: 12px; color: var(--gg-muted, #6B6557); padding: 8px 2px; }
+  .saved { font-size: 11px; color: var(--gg-accent, #C96442); opacity: 0; transition: opacity .3s; }
+  .saved.on { opacity: 1; }
+</style>
+</head>
+<body>
+  <h3>触发压缩的上下文占比</h3>
+  <div class="row">
+    <span>未归纳对话超过此占比时滚动摘要</span>
+    <span class="val" id="pctVal">60%</span>
+  </div>
+  <input type="range" id="pct" min="40" max="80" step="5" value="60">
+  <div class="hint">越低越早压缩（上下文更空、召回更快），越高越晚压缩（保留更多原文）。默认 60%。<span class="saved" id="saved">已保存</span></div>
+
+  <h3>本机可用模型（供「重型记忆插件」选记忆模型 · 只读）</h3>
+  <div class="models" id="models"><div class="empty">读取中…</div></div>
+
+<script>
+(function () {
+  'use strict';
+  var CFG = 'config';
+  var pct = document.getElementById('pct'), pctVal = document.getElementById('pctVal'), saved = document.getElementById('saved');
+  var savedTimer = null;
+
+  function showSaved() {
+    saved.classList.add('on');
+    if (savedTimer) clearTimeout(savedTimer);
+    savedTimer = setTimeout(function () { saved.classList.remove('on'); }, 1200);
+  }
+
+  function loadCfg() {
+    gguf.storage.get(CFG).then(function (c) {
+      var p = (c && typeof c.compressPct === 'number') ? c.compressPct : 60;
+      pct.value = p; pctVal.textContent = p + '%';
+    }).catch(function () {});
+  }
+
+  pct.addEventListener('input', function () { pctVal.textContent = pct.value + '%'; });
+  pct.addEventListener('change', function () {
+    gguf.storage.get(CFG).then(function (c) {
+      c = (c && typeof c === 'object') ? c : {};
+      c.compressPct = parseInt(pct.value, 10);
+      return gguf.storage.set(CFG, c);
+    }).then(function () {
+      showSaved();
+      gguf.events.broadcast('config-changed', null); // 通知后台 service 立即采用新配置
+    }).catch(function () {});
+  });
+
+  function human(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB'; }
+  function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+
+  function loadModels() {
+    var box = document.getElementById('models');
+    gguf.host.models().then(function (list) {
+      if (!list || !list.length) { box.innerHTML = '<div class="empty">未找到 GGUF 模型。</div>'; return; }
+      box.innerHTML = list.map(function (m) {
+        return '<div class="m"><span class="n">' + esc(m.name) + '</span><span class="s">' + esc(human(m.sizeMB || 0)) + '</span></div>';
+      }).join('');
+    }).catch(function () { box.innerHTML = '<div class="empty">读取模型列表失败。</div>'; });
+  }
+
+  gguf.events.on('show', function () { loadCfg(); loadModels(); });
+  loadCfg();
+  loadModels();
+})();
+</script>
+</body>
+</html>

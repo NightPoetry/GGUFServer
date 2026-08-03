@@ -1,0 +1,4 @@
+# Native artifacts land here after running scripts/build-llama-android.sh:
+#   libllamaserver.so   (the llama-server executable, renamed so Android extracts it)
+#   libllama.so, libggml*.so, libmtmd.so ...  (shared-library dependencies)
+# These are intentionally NOT committed — build them for your NDK/llama.cpp version.

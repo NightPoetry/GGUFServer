@@ -1,0 +1,22 @@
+{
+  "id": "com.gguf.meow",
+  "name": "猫嗓",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "接管发声的变声示范：所有朗读改走猫嗓——句尾带喵、音调拉高；禁用即恢复原声",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "panel": {
+    "size": 0.35,
+    "topbar": false
+  },
+  "permissions": [
+    "cap:tts"
+  ],
+  "provides": [
+    "tts"
+  ]
+}

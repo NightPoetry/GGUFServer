@@ -1,0 +1,41 @@
+{
+  "id": "com.gguf.heavymem",
+  "name": "重型记忆",
+  "version": "1.0.6",
+  "apiVersion": 1,
+  "description": "双模型记忆：后台用专门的记忆模型对历史做链接与检索（存放区两态·染色·碎片·做梦飞轮）。需加载第二个模型、双份内存占用，默认关闭，闲置时工作、不拖慢前台回复。可选「全局记忆」：跨会话索引与检索，关闭后自动隔离会话外内容。",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "settingsCard": "settings.html",
+  "gesture": {
+    "edge": "top",
+    "range": [
+      0.5,
+      0.75
+    ],
+    "threshold": 48
+  },
+  "panel": {
+    "size": 0.72
+  },
+  "permissions": [
+    "llm",
+    "chat:read",
+    "chat:context",
+    "chat:annotate",
+    "sessions:read"
+  ],
+  "hooks": [
+    "context",
+    "afterReply",
+    "continuation"
+  ],
+  "middleware": {
+    "scope": [
+      "local"
+    ]
+  }
+}

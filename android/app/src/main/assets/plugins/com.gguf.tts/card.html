@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音消息</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent; }
+  html, body { background: transparent; }
+  body {
+    color: var(--gg-fg, #2D2A26);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    padding: 2px 0 4px;
+  }
+  .bubble {
+    display: inline-flex; align-items: center; gap: 9px;
+    min-width: 148px; max-width: 86%;
+    padding: 10px 14px;
+    border-radius: 14px; border-top-left-radius: 5px;
+    background: color-mix(in srgb, var(--gg-accent, #C96442) 10%, var(--gg-card, #fff));
+    border: 1px solid color-mix(in srgb, var(--gg-accent, #C96442) 22%, transparent);
+  }
+  .spk { width: 18px; height: 18px; flex: none; color: var(--gg-accent, #C96442); }
+  .bars { display: flex; align-items: center; gap: 2.5px; height: 16px; flex: none; }
+  .bars i { width: 2.5px; border-radius: 2px; background: var(--gg-accent, #C96442);
+            height: 5px; opacity: .55; }
+  .playing .bars i { animation: bar .8s ease-in-out infinite; opacity: .9; }
+  .bars i:nth-child(1) { animation-delay: 0s; }
+  .bars i:nth-child(2) { animation-delay: .15s; }
+  .bars i:nth-child(3) { animation-delay: .3s; }
+  .bars i:nth-child(4) { animation-delay: .45s; }
+  .bars i:nth-child(5) { animation-delay: .6s; }
+  @keyframes bar { 0%,100% { height: 5px; } 50% { height: 14px; } }
+  .meta { font-size: 12px; color: var(--gg-muted, #6B6557); white-space: nowrap; }
+  .hint { font-size: 10.5px; color: var(--gg-muted, #6B6557); opacity: .75; margin: 5px 2px 0; }
+  .text {
+    display: none; margin-top: 7px; padding: 9px 12px;
+    border-radius: 10px; background: var(--gg-card, #fff);
+    border: 1px solid var(--gg-line, #E7E3D8);
+    font-size: 13px; line-height: 1.65; color: var(--gg-fg, #2D2A26);
+    -webkit-user-select: text; user-select: text;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .expanded .text { display: block; }
+</style>
+</head>
+<body>
+  <div class="bubble" id="bubble">
+    <svg class="spk" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1-3.29-2.5-4.03v8.05c1.5-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+    <span class="bars"><i></i><i></i><i></i><i></i><i></i></span>
+    <span class="meta" id="meta">语音消息</span>
+  </div>
+  <div class="text" id="text"></div>
+  <div class="hint">点按播放 / 停止 · 长按查看文字</div>
+
+<script>
+(function () {
+  'use strict';
+  var card = (window.__ggufCard || {});
+  var data = card.data || {};
+  var text = String(data.text || '');
+  var root = document.body;
+  var bubble = document.getElementById('bubble');
+
+  document.getElementById('text').textContent = text || '（空）';
+  document.getElementById('meta').textContent = '语音消息 · ' + text.length + ' 字';
+
+  // ---- 播放状态：轮询宿主 tts 状态驱动动画（本卡片发起的播放才认领 playing 态） ----
+  var mine = false;      // 当前发声是否由本卡片发起
+  var poll = null;
+  function setPlaying(on) {
+    root.classList.toggle('playing', !!on);
+    if (on && !poll) {
+      poll = setInterval(function () {
+        gguf.tts.status().then(function (st) {
+          if (!st || !st.speaking) { mine = false; setPlaying(false); }
+        }).catch(function () { mine = false; setPlaying(false); });
+      }, 500);
+    } else if (!on && poll) { clearInterval(poll); poll = null; }
+  }
+  function play() {
+    if (!text) return;
+    mine = true;
+    setPlaying(true);
+    gguf.tts.speak(text);
+  }
+  function stop() {
+    mine = false;
+    setPlaying(false);
+    gguf.tts.stop();
+  }
+
+  // ---- 交互：点按 = 播放/停止；长按 = 展开/收起文字（都是标准 DOM 事件，插件自便） ----
+  var pressTimer = null, longFired = false;
+  bubble.addEventListener('touchstart', function () {
+    longFired = false;
+    pressTimer = setTimeout(function () {
+      longFired = true;
+      root.classList.toggle('expanded');
+    }, 450);
+  }, { passive: true });
+  ['touchend', 'touchcancel', 'touchmove'].forEach(function (ev) {
+    bubble.addEventListener(ev, function () { clearTimeout(pressTimer); }, { passive: true });
+  });
+  bubble.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  bubble.addEventListener('click', function () {
+    if (longFired) { longFired = false; return; }
+    if (mine) stop(); else play();
+  });
+
+  // ---- 自动播放：插件设置（默认开）且卡片是"新鲜"的（刚由工具产生，而非滚动回来重建） ----
+  var fresh = data.postedAt && (Date.now() - data.postedAt) < 20000;
+  if (fresh) {
+    gguf.storage.get('autoplay').then(function (v) {
+      if (v !== false) play();
+    }).catch(function () { play(); });
+  }
+})();
+</script>
+</body>
+</html>

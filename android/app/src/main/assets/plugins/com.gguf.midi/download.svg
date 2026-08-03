@@ -1,0 +1,15 @@
+<!-- 角标图标源：音符 + 向下箭头（= 下载这段音乐）。
+     宿主的角标用 BitmapFactory 渲染，只吃位图，所以真正加载的是同名 PNG；
+     这份 SVG 是**图形的来源与可编辑版本**，改完用 scripts/gen-midi-icons.py 重新光栅化。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <g fill="#fff">
+    <!-- 八分音符（符头 + 符干 + 符尾），略偏左上，给箭头让位 -->
+    <ellipse cx="30" cy="52" rx="14" ry="10.5" transform="rotate(-22 30 52)"/>
+    <rect x="39" y="12" width="6" height="42" rx="3"/>
+    <path d="M45 13 C63 19 68 27 57 40 C62 28 57 21 45 19 Z"/>
+    <!-- 向下箭头：竖杆 + 箭头 + 托底横线（下载的通用语义） -->
+    <rect x="69" y="40" width="6" height="26" rx="3"/>
+    <path d="M60 60 L72 74 L84 60 Z"/>
+    <rect x="58" y="80" width="28" height="6" rx="3"/>
+  </g>
+</svg>

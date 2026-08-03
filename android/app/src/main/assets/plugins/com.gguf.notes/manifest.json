@@ -1,0 +1,51 @@
+{
+  "id": "com.gguf.notes",
+  "name": "便签",
+  "version": "1.0.7",
+  "apiVersion": 1,
+  "description": "会话专属便签：记要点、支持模型对话中主动记录/修改/清空",
+  "author": "gguf",
+  "entry": {
+    "ui": "ui.html",
+    "service": "service.js"
+  },
+  "gesture": {
+    "edge": "top",
+    "type": "swipe",
+    "range": [
+      0.25,
+      0.75
+    ],
+    "threshold": 48
+  },
+  "panel": {
+    "size": 0.6
+  },
+  "permissions": [
+    "llm",
+    "chat:read",
+    "chat:route",
+    "chat:context",
+    "chat:annotate"
+  ],
+  "hooks": [
+    "route",
+    "curate",
+    "handle",
+    "context",
+    "tool"
+  ],
+  "middleware": {
+    "scope": [
+      "local"
+    ]
+  },
+  "tools": [
+    {
+      "name": "notes.append",
+      "description": "把一条要点追加进用户便签",
+      "input": "text"
+    }
+  ],
+  "systemClause": "- 记便签：用户交代要记的事时直接记下，别说自己没有记忆。"
+}

@@ -1,0 +1,54 @@
+name: Android Build
+
+# 只验证「能不能编出 debug APK」——不签名、不碰任何密钥/秘钥。
+# release 签名包仍然按 docs/打包流程.md 本地手工出，未接入 CI。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: "26.3.11579264"
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        run: sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+
+      - name: Cache llama.cpp native build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: llama-android-cpu-${{ hashFiles('scripts/build-llama-android.sh', 'scripts/patches/**') }}
+
+      - name: Build llama.cpp native libs (CPU only — CI 只验证能编译，不需要 Vulkan)
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          WITH_VULKAN: "0"
+        run: ./scripts/build-llama-android.sh
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
