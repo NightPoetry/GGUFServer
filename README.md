@@ -17,6 +17,43 @@ OpenAI 兼容协议（`/v1/chat/completions`、`/v1/completions`、`/v1/models`�
 
 ---
 
+## 快速使用指南（不用装开发环境，几分钟能跑起来）
+
+### 1. 下载并安装 APK
+
+去 [Releases 页面](https://github.com/NightPoetry/GGUFServer/releases/latest) 下载最新的
+`GGUF-Server-release-*.apk`，传到手机后点击安装（首次安装系统会提示「未知来源」，允许即可）。
+不想装现成包、想自己编译的话见下方「三步跑起来」。
+
+### 2. 找一个 GGUF 模型文件，放进手机
+
+推荐直接用 **Qwen3.5-2B-Instruct**（多模态、中文强）或 **MiniCPM5-1B**（更小更快，纯文本），
+详见下方「推荐的手机可跑模型」。放进手机任选一种方式：
+
+- **手机上直接下载**：用手机浏览器 / Hugging Face App 把 `.gguf` 下载到「Download」目录。
+- **电脑上下好，数据线传进去**：
+  ```bash
+  adb push Qwen3.5-2B-Q8_0.gguf /sdcard/Download/
+  ```
+  或者用系统「文件」App / 微信 / 网盘把电脑上下好的文件传到手机——效果一样，选你顺手的方式即可。
+
+### 3. 打开 App，上传模型，启动服务
+
+打开「GGUF 服务器」App → 进「设置」→ 点 **上传 GGUF** → 选中刚才放进去的模型 → 点 **启动服务**。
+想用图片输入（目前仅 Qwen3.5-2B 支持），把配套的 `mmproj-*.gguf` 也上传一遍，在「视觉投影 mmproj」里选中它：
+
+![设置页模型区：MiniCPM5-1B 与 Qwen3.5-2B 均已上传，mmproj-Qwen3.5-2B 已就绪可选](docs/screenshots/models-mmproj.png)
+
+服务启动后，卡片上会显示局域网 API 地址和模型调用名，可一键复制地址或 curl 命令：
+
+![设置页服务区：状态运行中，显示 API 地址、模型调用名、复制地址/curl 按钮](docs/screenshots/settings-running.png)
+
+### 4. 在电脑（或任意设备）上调用
+
+确保调用方和手机在**同一个 WiFi**，把地址换成 App 显示的那个——curl / Python 示例见下方「调用（OpenAI 兼容）」一节。
+
+---
+
 ## 功能全览（2026-07-10 更新）
 
 在最初「手机上跑 llama-server 对外提供 OpenAI API」的基础上，App 已长成一个完整的本地 AI 工作台：
@@ -215,19 +252,18 @@ print(resp.choices[0].message.content)
 
 ---
 
-## 推荐的手机可跑模型（GGUF，选 Q4_K_M 量化）
+## 推荐的手机可跑模型（GGUF）
 
-手机内存有限，优先 0.5B–3B：
+手机内存有限，优先 1B–2B 档位；本项目全程真机验证用的就是下面两个，不是随便挑的老模型：
 
 | 模型 | 量化 | 大约体积 | 说明 |
 |---|---|---|---|
-| Qwen2.5-0.5B-Instruct | Q4_K_M | ~0.4 GB | 极小，任何手机都能跑 |
-| Qwen2.5-1.5B-Instruct | Q4_K_M | ~1.0 GB | 中文不错，性价比高 |
-| Llama-3.2-1B-Instruct | Q4_K_M | ~0.8 GB | 通用 |
-| Llama-3.2-3B-Instruct | Q4_K_M | ~2.0 GB | 需 6GB+ 内存手机 |
-| Gemma-2-2B-it | Q4_K_M | ~1.6 GB | 质量好 |
+| **Qwen3.5-2B-Instruct**（推荐） | Q8_0 | ~2.2 GB | **首选**：中文强、支持工具调用、**自带多模态**（配 `mmproj` 可读图）；App 里的插件生态（视觉相关能力）也是照它测的。8GB+ 内存手机优先选它 |
+| MiniCPM5-1B | Q8_0 | ~1.2 GB | 更小更快（本项目多数延迟基准用的是它），但**不支持图片输入**；内存紧张（≤6GB）的老机型可选这个 |
 
-去 Hugging Face 搜 `<模型名>-GGUF` 下载对应 `Q4_K_M.gguf`。经验：**模型体积 < 手机可用内存的一半** 比较稳。
+**多模态别漏下载**：选 Qwen3.5-2B 想要图片输入功能，除了主模型文件，**还要额外下载配套的 `mmproj-*.gguf`**（同一个模型仓库下、体积小很多的那个文件）——App 里两个都要「上传 GGUF」，在模型下方选中 mmproj 才会启用图片输入（见下方“调用”一节的示例）。只下主模型、不下 mmproj 是纯文本，功能不会报错但也用不了图片。
+
+去 Hugging Face 搜 `Qwen3.5-2B-Instruct-GGUF` 或 `MiniCPM5-1B-GGUF` 下载对应量化文件。经验：**模型体积 < 手机可用内存的一半** 比较稳。
 
 ---
 
