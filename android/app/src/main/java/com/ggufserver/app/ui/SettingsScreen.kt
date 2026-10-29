@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.outlined.DataArray
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Folder
@@ -103,6 +104,7 @@ import com.ggufserver.app.ServerState
 import com.ggufserver.app.data.ModelFile
 import com.ggufserver.app.model.StorageLocation
 import com.ggufserver.app.plugin.PluginStore
+import com.ggufserver.app.server.EmbeddingServer
 import com.ggufserver.app.util.NetworkUtils
 import java.io.File
 import java.util.Locale
@@ -187,6 +189,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel(), onBack: (() -> Unit)? = null
             ServiceGroup(state, activeModel, if (state == ServerState.RUNNING) servedPort else (vm.port.toIntOrNull() ?: 8080), callName)
             StorageGroup(vm)
             ModelsGroup(vm, enabled = idle, onPick = { picker.launch(arrayOf("*/*")) })
+            EmbeddingGroup(vm, enabled = idle)
             ConfigGroup(vm, enabled = idle)
             ActionButton(state) { if (idle) vm.startServer() else vm.stopServer() }
             PluginEntryGroup(onOpen = { showPluginManager = true })
@@ -618,6 +621,90 @@ private fun MmprojSelector(vm: MainViewModel, enabled: Boolean) {
                 "⚠ 手机 CPU 跑视觉仍偏慢：即使压缩后一张图约几十秒，请把客户端超时设大（如 300 秒）。",
                 fontSize = 12.sp, lineHeight = 17.sp, color = tones.bad
             )
+        }
+    }
+}
+
+/**
+ * 「向量模型（嵌入服务）」组：选择专用嵌入 GGUF，随主服务一并拉起第二个 llama-server 实例，
+ * 对局域网提供 OpenAI 兼容 /v1/embeddings。选择器样式与 mmproj 选择器同构；运行状态与
+ * API 地址卡沿用「服务」组的展示语言（状态点 + CopyableField + 复制 curl）。
+ */
+@Composable
+private fun EmbeddingGroup(vm: MainViewModel, enabled: Boolean) {
+    val tones = LocalWarmTones.current
+    val clipboard = LocalClipboardManager.current
+    val emb by vm.embeddingStatus.collectAsStateWithLifecycle()
+    Group(Icons.Outlined.DataArray, "向量模型（嵌入服务）") {
+        Text(
+            "对局域网提供 OpenAI 兼容的 /v1/embeddings（RAG / 语义检索用）。选专用嵌入模型（如 Qwen3-Embedding、EmbeddingGemma）；服务启动时一并拉起，停止时一并卸载。",
+            fontSize = 12.sp, lineHeight = 17.sp, color = tones.faint
+        )
+        if (vm.models.isEmpty()) {
+            Text("此位置还没有模型，先在「模型」组上传 GGUF。", fontSize = 12.5.sp, lineHeight = 18.sp, color = tones.muted)
+        } else {
+            SelectRow(
+                title = "不启用",
+                meta = null,
+                selected = vm.selectedEmbedding == null,
+                enabled = enabled,
+                onSelect = { vm.selectEmbedding(null) }
+            )
+            vm.models.forEach { model ->
+                SelectRow(
+                    title = model.name,
+                    meta = formatBytes(model.sizeBytes),
+                    selected = vm.selectedEmbedding?.file == model.file,
+                    enabled = enabled,
+                    onSelect = { vm.selectEmbedding(model) },
+                    trailing = { DeleteIcon(enabled) { vm.requestDelete(model) } }
+                )
+            }
+        }
+        when (emb.phase) {
+            EmbeddingServer.Phase.STARTING -> {
+                HorizontalDivider(color = tones.line)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(10.dp).background(color = tones.warn, shape = CircleShape))
+                    Spacer(Modifier.width(10.dp))
+                    Text("嵌入服务启动中…", fontSize = 14.sp, color = tones.ink)
+                }
+            }
+            EmbeddingServer.Phase.RUNNING -> {
+                HorizontalDivider(color = tones.line)
+                val ip = NetworkUtils.localIpAddress() ?: "手机IP"
+                val base = "http://$ip:${EmbeddingServer.EMB_PORT}/v1"
+                val callName = emb.alias ?: "embedding"
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(10.dp).background(color = tones.ok, shape = CircleShape))
+                    Spacer(Modifier.width(10.dp))
+                    Text("嵌入服务运行中", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = tones.ink)
+                    Spacer(Modifier.weight(1f))
+                    HeaderAction("自检") { vm.testEmbedding() }
+                }
+                Text("嵌入 API 地址（OpenAI 兼容 · 局域网）", fontSize = 12.5.sp, color = tones.muted)
+                CopyableField(base, clipboard)
+                Text("嵌入调用名（/v1/embeddings 的 model 字段）", fontSize = 12.5.sp, color = tones.muted)
+                CopyableField(callName, clipboard)
+                WarmButton("复制 curl", icon = Icons.Filled.ContentCopy) {
+                    val curl = "curl $base/embeddings -H \"Content-Type: application/json\" " +
+                        "-d '{\"model\":\"$callName\",\"input\":\"你好\"}'"
+                    clipboard.setText(AnnotatedString(curl))
+                }
+            }
+            EmbeddingServer.Phase.ERROR -> {
+                HorizontalDivider(color = tones.line)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(10.dp).background(color = tones.bad, shape = CircleShape))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "嵌入服务出错：${emb.error ?: "未知错误"}（不影响主服务，详情见日志）",
+                        fontSize = 12.5.sp, lineHeight = 17.sp, color = tones.bad,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            EmbeddingServer.Phase.IDLE -> {}
         }
     }
 }

@@ -43,6 +43,11 @@ class SettingsStore(context: Context) {
         get() = p.getBoolean("noMmap", false)
         set(v) { p.edit().putBoolean("noMmap", v).apply() }
 
+    /** 向量模型（嵌入服务）的 GGUF 绝对路径；空 = 不启用。与主模型共用模型目录，启动服务时一并拉起。 */
+    var embeddingModelPath: String
+        get() = p.getString("embModelPath", "") ?: ""
+        set(v) { p.edit().putString("embModelPath", v).apply() }
+
     var compressImages: Boolean
         get() = p.getBoolean("compressImages", true)
         set(v) { p.edit().putBoolean("compressImages", v).apply() }

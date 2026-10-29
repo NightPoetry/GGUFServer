@@ -194,8 +194,21 @@ class LlamaServerService : Service() {
                 return
             }
 
-            // Flip to RUNNING once the model has loaded (poll /health, plus a log-based backup).
-            startHealthPoll(internalPort, port, modelName)
+        // Flip to RUNNING once the model has loaded (poll /health, plus a log-based backup).
+        startHealthPoll(internalPort, port, modelName)
+
+        // 向量模型（嵌入服务）随主服务一并拉起：fail-open，坏了只记日志与状态，主服务不受影响。
+        val embeddingPath = intent.getStringExtra(EXTRA_EMBEDDING).orEmpty()
+        if (embeddingPath.isNotBlank()) {
+            val embAlias = File(embeddingPath).nameWithoutExtension
+            thread(name = "embedding-start", isDaemon = true) {
+                try {
+                    EmbeddingServer.ensure(applicationContext, embeddingPath, embAlias, apiKey, threads)
+                } catch (e: Exception) {
+                    ServerBus.appendLog("[向量模型] 启动失败（不影响主服务）：${e.message}")
+                }
+            }
+        }
 
             thread(name = "llama-server-io", isDaemon = true) {
                 try {
@@ -268,6 +281,7 @@ class LlamaServerService : Service() {
         gateway = null
         // 前台服务停了就没有对话在进行，记忆模型（第二个实例）也一并卸载，释放那份内存。
         runCatching { MemoryModelServer.stop() }
+        runCatching { EmbeddingServer.stop() }
         process?.let { p ->
             runCatching { p.destroy() }
             runCatching { p.destroyForcibly() }
@@ -397,6 +411,7 @@ class LlamaServerService : Service() {
         private const val EXTRA_NO_MMAP = "noMmap"
         private const val EXTRA_TEMP = "temperature"
         private const val EXTRA_TOP_P = "topP"
+        private const val EXTRA_EMBEDDING = "embeddingModelPath"
 
         fun start(context: Context, cfg: ServerConfig) {
             ServerBus.lastConfig = cfg
@@ -417,6 +432,7 @@ class LlamaServerService : Service() {
                 putExtra(EXTRA_NO_MMAP, cfg.noMmap)
                 putExtra(EXTRA_TEMP, cfg.temperature)
                 putExtra(EXTRA_TOP_P, cfg.topP)
+                putExtra(EXTRA_EMBEDDING, cfg.embeddingModelPath)
             }
             ContextCompat.startForegroundService(context, intent)
         }

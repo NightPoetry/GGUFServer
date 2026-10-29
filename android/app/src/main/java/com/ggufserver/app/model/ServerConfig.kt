@@ -16,5 +16,6 @@ data class ServerConfig(
     val compressImages: Boolean = true,
     val maxImageDim: Int = 256,
     val temperature: Float = 0.8f,
-    val topP: Float = 0.95f
+    val topP: Float = 0.95f,
+    val embeddingModelPath: String = ""
 )

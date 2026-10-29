@@ -12,6 +12,7 @@ import com.ggufserver.app.data.ModelStore
 import com.ggufserver.app.data.SettingsStore
 import com.ggufserver.app.model.ServerConfig
 import com.ggufserver.app.model.StorageLocation
+import com.ggufserver.app.server.EmbeddingServer
 import com.ggufserver.app.server.EngineBenchmark
 import com.ggufserver.app.server.LlamaServerService
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +57,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var mmprojFiles by mutableStateOf<List<ModelFile>>(emptyList())
         private set
     var selectedMmproj by mutableStateOf<ModelFile?>(null)
+
+    /** 向量模型（嵌入服务）选中的文件；null = 不启用。与主模型共用同一批 .gguf，路径持久化在 settings。 */
+    var selectedEmbedding by mutableStateOf<ModelFile?>(null)
+        private set
+
+    /** 嵌入服务运行状态（随主服务拉起/停止），设置页向量模型卡直接订阅。 */
+    val embeddingStatus get() = EmbeddingServer.status
+
+    /** 对嵌入服务打一次真实 /v1/embeddings 自检，结果进日志（服务运行中才有意义）。 */
+    fun testEmbedding() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { EmbeddingServer.selfTest() }
+                .onSuccess { dim -> ServerBus.appendLog("[向量模型] 自检通过：返回 $dim 维向量") }
+                .onFailure { ServerBus.appendLog("[向量模型] 自检失败：${it.message}") }
+        }
+    }
 
     val state get() = ServerBus.state
     val activeModel get() = ServerBus.activeModel
@@ -114,6 +131,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 手动选过且文件还在就保留；否则只自动配对同家族的 mmproj（配不上 = 无）
         selectedMmproj = selectedMmproj?.let { c -> mmprojFiles.find { it.file == c.file } }
             ?: autoMmprojFor(selected)
+        // 向量模型：按持久化路径找回（文件被删了就退回「不启用」）
+        val embPath = settings.embeddingModelPath
+        selectedEmbedding = if (embPath.isBlank()) null else models.find { it.file.absolutePath == embPath }
     }
 
     fun selectModel(m: ModelFile) {
@@ -124,6 +144,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectMmproj(m: ModelFile?) { selectedMmproj = m }
+
+    /** 选择/清空向量模型（立即持久化；启动服务时生效）。 */
+    fun selectEmbedding(m: ModelFile?) {
+        selectedEmbedding = m
+        settings.embeddingModelPath = m?.file?.absolutePath ?: ""
+    }
 
     /**
      * 只有文件名同源（去掉 mmproj- 前缀和量化后缀后同家族）的 mmproj 才自动配对。
@@ -293,6 +319,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         compressImages = compressImages,
         maxImageDim = maxImageDim.toIntOrNull()?.coerceIn(128, 4096) ?: 256,
         temperature = settings.chatTemperature,
-        topP = settings.chatTopP
+        topP = settings.chatTopP,
+        embeddingModelPath = settings.embeddingModelPath
     )
 }
