@@ -1,0 +1,113 @@
+#!/bin/sh
+# ── 设计文档门禁（design-archive skill）──────────────────────────────────
+# 规则：凡源代码改动必须有同提交的设计文档；新增文档必须有「设计原话」节（逐字）；冲突追溯链接不得悬空。
+# 本钩子只看暂存区，不做任何网络操作。
+#
+# 安装（每个项目一次）：
+#   mkdir -p scripts/git-hooks && cp <skill>/hooks/pre-commit scripts/git-hooks/ && chmod +x scripts/git-hooks/pre-commit
+#   git config core.hooksPath scripts/git-hooks
+#
+# 文档目录：git config design-doc.dir 可显式指定；未配置时自动发现常见目录名。
+# 分库制度（20261029 用户令）：子项目文档在各 <子项目>/docs/设计文档/，编号各库独立——
+#   原话门禁与文档门禁对任何含 docs/设计文档|开源设计文档 的路径都认账，不再只扫根库。
+# 逃逸阀：纯杂务（版本号/构建产物/依赖锁）确无设计变更时 FASFOX_SKIP_DOC=1 git commit …
+#   （提交说明写明原因）；原话门禁误拦 FASFOX_SKIP_ORIG=1；链接校验误拦 FASFOX_SKIP_LINKS=1。
+
+# ── 逃逸阀审计（防静默绕过）：凡用逃逸阀必须留痕，可随时审查 ──
+# agent/人都可以设 FASFOX_SKIP_*，但每次使用都会追加一行到 .git/doc-gate-audit.log
+# （.git 内：不入库、不随 worktree 走、日常不会碰到）。定期 cat 审查即可发现绕过模式。
+AUDIT="$(git rev-parse --git-dir)/doc-gate-audit.log"
+audit_skip() {
+  {
+    printf '%s | %s | %s | %s\n' "$(date +%FT%T)" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" "$1" "$2"
+  } >> "$AUDIT" 2>/dev/null
+}
+
+# 不触发门禁的路径：设计文档本身/纯文档/构建产物/发布包/本地数据/依赖锁/版本号
+NONSRC_RE='^(docs/|public/|release/|dist/|build/|data/|update-keys/|\.gitignore$|package-lock\.json$)'
+VERSION_RE='(^|/)version\.js$'
+
+# core.quotepath=false：git 默认把非 ASCII 路径转义成八进制串，会让中文目录前缀匹配不上（实测坑）。别去掉。
+STAGED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR)
+[ -z "$STAGED" ] && exit 0
+
+# ── 文档目录自动发现 ──
+DOC_DIR=$(git config design-doc.dir)
+if [ -z "$DOC_DIR" ]; then
+  for d in 开源设计文档 docs/设计文档 docs/design-archive 设计文档; do
+    if [ -d "$d" ]; then DOC_DIR="$d"; break; fi
+  done
+fi
+
+# ── 原话门禁：新增文档必须有「设计原话」节（老板立规：设计必录原文——逐字，笔误也保留）──
+ADDED_DOCS=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=A | grep '\.md$' || true)
+if [ -n "$ADDED_DOCS" ] && [ -n "$DOC_DIR" ] && [ -z "$FASFOX_SKIP_ORIG" ]; then
+  MISS=""
+  for f in $ADDED_DOCS; do
+    case "$f" in
+      "$DOC_DIR"/*.md) grep -q "设计原话" "$f" 2>/dev/null || MISS="$MISS $f" ;;
+      *"docs/设计文档"/*.md|*"开源设计文档"/*.md) grep -q "设计原话" "$f" 2>/dev/null || MISS="$MISS $f" ;;
+    esac
+  done
+  if [ -n "$MISS" ]; then
+    {
+      echo ""
+      echo "✗ 原话门禁：新增设计文档缺少「设计原话」节（所有设计必须记录原文——逐字，笔误也保留）。"
+      echo ""
+      echo "  补法：文档加 §0 设计原话（逐字）节；骨架由 new-design-doc.js 自动生成，填入即可。"
+      echo "  涉及："
+      printf '%s\n' $MISS | sed 's/^/    /'
+      echo "  逃逸阀：FASFOX_SKIP_ORIG=1 git commit …（使用即留审计痕迹于 .git/doc-gate-audit.log）"
+      echo ""
+    } >&2
+    exit 1
+  fi
+fi
+
+# ── 设计冲突追溯管线：追溯链接不得悬空（需 skill 的 design-supersede.js）──
+TOOLS="$HOME/.agents/skills/design-archive/scripts"
+if [ -n "$DOC_DIR" ] && [ -f "$TOOLS/design-supersede.js" ] && [ -z "$FASFOX_SKIP_LINKS" ]; then
+  if ! DESIGN_DOC_DIR="$DOC_DIR" node "$TOOLS/design-supersede.js" check >&2; then
+    echo "  修法：改正悬空编号，或确属误标则删除该标注行（逃逸阀 FASFOX_SKIP_LINKS=1）。" >&2
+    exit 1
+  fi
+fi
+if [ -n "$ADDED_DOCS" ] && [ -n "$DOC_DIR" ]; then
+  {
+    echo "▸ 设计冲突自查（新设计与老设计冲突必须在老档标注，可追溯防冲突）："
+    echo "  □ 有冲突/取代关系？有 → node $TOOLS/design-supersede.js 老号 新号 \"范围\""
+    echo "  □ 无冲突则无需动作。"
+    echo ""
+  } >&2
+fi
+
+# ── 文档门禁：源代码改动必须有同提交的设计文档 ──
+# 若项目未建立档体系（DOC_DIR 为空）则本门禁不生效（建体系：拷贝 skill templates/README-编写规范.md）。
+[ -z "$DOC_DIR" ] && exit 0
+
+SRC=$(printf '%s\n' "$STAGED" | grep -Ev "^$DOC_DIR/" | grep -Ev "$NONSRC_RE" | grep -Ev '\.(md|txt)$' | grep -Ev "$VERSION_RE" || true)
+[ -z "$SRC" ] && exit 0
+
+DOCS=$(printf '%s\n' "$STAGED" | grep -Ec "(^|/)(docs/设计文档|开源设计文档)/" || true)
+if [ "$DOCS" -eq 0 ] && [ -n "$FASFOX_SKIP_DOC" ]; then
+  audit_skip "SKIP_DOC" "$(printf '%s\n' "$SRC" | tr '\n' ' ')"
+elif [ "$DOCS" -eq 0 ]; then
+  {
+    echo ""
+    echo "✗ 设计文档门禁：本次提交包含源代码改动，但没有同提交任何设计文档库（根库或子项目库）下的文档。"
+    echo ""
+    echo "  规则：凡用户明确要求的功能/修复/样式/文案（无论大小），设计文档必须与代码同一提交；"
+    echo "        且文档要写到「源代码全丢，只留文档也能重建」（八件套 + 重建清单）。"
+    echo "        分库制度：子项目的档落 <子项目>/docs/设计文档/，编号各库独立。"
+    echo ""
+    echo "  ① 补档：node $HOME/.agents/skills/design-archive/scripts/new-design-doc.js \"主题\" --dir <子项目>/docs/设计文档（编号自动+1）"
+    echo "  ② 同主题迭代：更新既有文档（沿用原编号，演进写进 §6 履历），git add 一并提交"
+    echo "  ③ 确无设计变更的纯杂务：FASFOX_SKIP_DOC=1 git commit …（使用即留审计痕迹于 .git/doc-gate-audit.log）"
+    echo ""
+    echo "  本次触及的源代码文件："
+    printf '%s\n' "$SRC" | sed 's/^/    /'
+    echo ""
+  } >&2
+  exit 1
+fi
+exit 0
