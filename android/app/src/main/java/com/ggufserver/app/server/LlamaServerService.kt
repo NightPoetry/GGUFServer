@@ -154,7 +154,7 @@ class LlamaServerService : Service() {
         // (--reasoning off sets enable_thinking=false in the chat template.)
         if (disableThinking) { cmd += "--reasoning"; cmd += "off" }
         // mmap off can help when the model lives on an SD card / exFAT.
-        if (noMmap) { cmd += "--no-mmap" }
+        if (noMmap) { cmd += "--load-mode"; cmd += "none" }
         if (apiKey.isNotBlank()) {
             cmd += "--api-key"
             cmd += apiKey

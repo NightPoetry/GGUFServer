@@ -228,6 +228,10 @@ object PluginStore {
         for (id in ids) {
             runCatching { releaseBuiltin(am, id) }
         }
+        // 转正清理：模型市场 v1.1.18 曾以内置插件形态出厂，v1.1.19 起是原生设置页
+        // （ui/ModelHubScreen.kt），assets 里已无此包——把设备上残留的已装副本移除，
+        // 免得插件管理页留一个指向旧 WebView 页的死条目。只删这一个已知 id，不动其他插件。
+        runCatching { File(pluginsDir, "com.gguf.modelhub").deleteRecursively() }
     }
 
     private fun releaseBuiltin(am: AssetManager, id: String) {

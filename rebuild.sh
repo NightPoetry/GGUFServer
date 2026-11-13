@@ -54,7 +54,7 @@ echo ">> 编译 llama-server + llama-bench (-j$JOBS) ..."
 
 # 3) 拷贝到 jniLibs：全部 .so（含 CPU 变体 + Vulkan），可执行文件改名 lib*.so
 echo ">> 更新 jniLibs ..."
-mkdir -p "$JNI"; rm -f "$JNI"/*.so
+mkdir -p "$JNI"; rm -f "$JNI"/libggml*.so "$JNI"/libllama*.so "$JNI"/libmtmd.so
 find "$BUILD/bin" -maxdepth 1 -name '*.so' -exec cp {} "$JNI/" \;
 cp "$BUILD/bin/llama-server" "$JNI/libllamaserver.so"
 cp "$BUILD/bin/llama-bench"  "$JNI/libllamabench.so"

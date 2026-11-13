@@ -12,6 +12,7 @@ import com.ggufserver.app.data.ModelStore
 import com.ggufserver.app.data.SettingsStore
 import com.ggufserver.app.model.ServerConfig
 import com.ggufserver.app.model.StorageLocation
+import com.ggufserver.app.plugin.ModelHubDownloader
 import com.ggufserver.app.server.EmbeddingServer
 import com.ggufserver.app.server.EngineBenchmark
 import com.ggufserver.app.server.LlamaServerService
@@ -78,7 +79,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val activeModel get() = ServerBus.activeModel
     val logs get() = ServerBus.logs
 
-    init { refresh() }
+    init {
+        refresh()
+        // 模型市场下载完成 → 自动刷新模型列表（下载器是应用级单例，跨界面存活；
+        // 文件已落在当前选中位置，refresh() 即入列并保持原选中）
+        viewModelScope.launch {
+            ModelHubDownloader.state.collect { s ->
+                if (s.phase == ModelHubDownloader.Phase.DONE) refresh()
+            }
+        }
+    }
 
     private fun pickLocation(): StorageLocation =
         locations.firstOrNull { it.path == settings.locationPath } ?: locations.first()

@@ -623,6 +623,7 @@ class PluginBridge(
         return arr
     }
 
+
     private fun chatCurrent(): JSONObject? {
         val sid = PluginRuntime.lastLocalSessionId?.toLongOrNull() ?: return null
         // 会话可能还没落盘（刚 newChat、一条消息都没发）：也要给出 id，让便签面板等 UI 立即可用

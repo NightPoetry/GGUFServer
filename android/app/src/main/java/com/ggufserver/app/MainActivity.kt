@@ -1,6 +1,19 @@
 package com.ggufserver.app
 
 import android.os.Bundle
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.Modifier
+import com.ggufserver.app.ui.LocalWarmTones
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -23,7 +36,28 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             GgufTheme {
-                AppRoot()
+                // 宽屏封顶（FasFox 面板语态）：≥600dp 时整个 App 收进 760dp 居中列，
+                // 两侧同底色留白 + 发丝线，聊天/设置/市场所有屏一次到位地解决
+                // 「内容全宽拉伸、输入框贴边、顶栏图标铺满」的填充问题（用户令「全面参考FasFox」）。
+                // 手机竖屏（<600dp）不受影响，仍全幅。
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val wide = maxWidth >= 600.dp
+                    if (wide) {
+                        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center) {
+                            Box(
+                                Modifier
+                                    .width(760.dp)
+                                    .fillMaxHeight()
+                                    .background(LocalWarmTones.current.bg)
+                                    .border(0.6.dp, LocalWarmTones.current.line, RectangleShape)
+                            ) {
+                                AppRoot()
+                            }
+                        }
+                    } else {
+                        Box(Modifier.fillMaxSize()) { AppRoot() }
+                    }
+                }
             }
         }
     }

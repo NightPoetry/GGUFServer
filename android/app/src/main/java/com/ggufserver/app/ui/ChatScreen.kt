@@ -134,6 +134,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -301,15 +302,42 @@ fun ChatScreen(vm: ChatViewModel = viewModel(), onOpenSettings: () -> Unit) {
                         )
                     }
                 ) {
-                    Scaffold(
-                        containerColor = tones.bg,
+                    // 宽屏（≥600dp）左侧纵栏（v1.1.21）：顶栏的插件直显区+固定功能区全部迁入左纵栏
+                    // （照 HubRail/FasFox 语态，用户令「说着平板左侧纵栏，但是所有的菜单还是在顶部」补账）；
+                    // 窄屏顶栏保持原样。消息区自带的下滑开门户/横滑开抽屉手势宽窄屏都保留。
+                    val isWide = LocalConfiguration.current.screenWidthDp >= 600
+                    Row(Modifier.fillMaxSize()) {
+                        if (isWide) {
+                            ChatRail(
+                                topbarPlugins = enabledPlugins.filter { it.manifest.panelTopbar },
+                                portalOpen = portalOpen,
+                                portalTabId = portalTabId,
+                                onPortalTab = { id ->
+                                    if (portalOpen && portalTabId == id) portalOpen = false
+                                    else { portalTabId = id; portalOpen = true }
+                                },
+                                launchpadOpen = launchpadOpen,
+                                onLaunchpad = { launchpadOpen = !launchpadOpen },
+                                onHistory = { scope.launch { drawerState.open() } },
+                                onNewChat = { vm.newChat() },
+                                onConfig = { scope.launch { configDrawerState.open() } },
+                                serverRunning = serverState == ServerState.RUNNING,
+                                busyLight = vm.busy || activeRequests > 0 || serverState != ServerState.RUNNING,
+                                onSettings = onOpenSettings,
+                                model = model
+                            )
+                            Spacer(Modifier.width(1.dp).fillMaxHeight().background(tones.line))
+                        }
+                        Scaffold(
+                            modifier = Modifier.weight(1f),
+                            containerColor = tones.bg,
                         snackbarHost = {
                             SnackbarHost(snackbarHostState) { data ->
                                 Snackbar(data, containerColor = tones.card, contentColor = tones.ink)
                             }
                         },
                         topBar = {
-                            TopAppBar(
+                            if (!isWide) TopAppBar(
                                 colors = TopAppBarDefaults.topAppBarColors(containerColor = tones.bg),
                                 title = { },
                                 // 从顶栏区域向下滑 = 拉出交互门户（收起走面板底部的卷帘门拉手）。
@@ -344,10 +372,13 @@ fun ChatScreen(vm: ChatViewModel = viewModel(), onOpenSettings: () -> Unit) {
                                     // 槽位 44dp、分隔符约 13dp：固定功能区占 5 槽，剩余宽度全归插件直显槽
                                     val slots = ((screenWidthDp - 16 - 13) / 44).coerceAtLeast(5)
                                     val directPlugins = topbarPlugins.take((slots - 5).coerceAtLeast(0))
+                                    val wideBar = LocalConfiguration.current.screenWidthDp >= 600
                                     Row(
-                                        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                        Modifier.fillMaxWidth().padding(horizontal = if (wideBar) 32.dp else 8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        // 宽屏下铺满会把 5 个图标摊到 700dp+（间距失衡，用户点名不美观）；
+                                        // 宽屏左聚拢 30dp 间距，手机保持原铺满规矩
+                                        horizontalArrangement = if (wideBar) Arrangement.spacedBy(30.dp, Alignment.Start) else Arrangement.SpaceBetween,
                                     ) {
                                         // 左区 = 直显插件快捷图标；点按 = 开门户并定位到该插件选项卡，再点同一个收起。
                                         // panel.topbar=false 的插件（纯角标/纯后台）不占直显位，启动台仍列全量兜底。
@@ -496,7 +527,7 @@ fun ChatScreen(vm: ChatViewModel = viewModel(), onOpenSettings: () -> Unit) {
                                         state = listState,
                                         reverseLayout = true,
                                         modifier = Modifier.fillMaxWidth(),
-                                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+                                        contentPadding = PaddingValues(horizontal = if (LocalConfiguration.current.screenWidthDp >= 600) 36.dp else 18.dp, vertical = 10.dp)
                                     ) {
                                         items(vm.messages.asReversed(), key = { it.id }) { msg ->
                                             MessageRow(
@@ -613,6 +644,7 @@ fun ChatScreen(vm: ChatViewModel = viewModel(), onOpenSettings: () -> Unit) {
             onConfirm = { tags -> vm.updateTags(s.id, tags); pendingTagEdit = null }
         )
     }
+}
 }
 
 /** 标签编辑弹窗（历史抽屉入口，迁自原便签选项卡）：逗号/空格分隔多个标签，规范化交给宿主 cleanTags。 */
@@ -1813,6 +1845,7 @@ private fun Composer(vm: ChatViewModel, model: String, ready: Boolean) {
     val tones = LocalWarmTones.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val widePad = LocalConfiguration.current.screenWidthDp >= 600
     Surface(
         color = tones.card,
         shape = RoundedCornerShape(18.dp),
@@ -1820,7 +1853,7 @@ private fun Composer(vm: ChatViewModel, model: String, ready: Boolean) {
         shadowElevation = 2.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 14.dp)
+            .padding(start = if (widePad) 32.dp else 14.dp, end = if (widePad) 32.dp else 14.dp, top = 6.dp, bottom = 14.dp)
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             BasicTextField(
@@ -1883,5 +1916,125 @@ private fun Composer(vm: ChatViewModel, model: String, ready: Boolean) {
                 }
             }
         }
+    }
+}
+
+/**
+ * 宽屏（≥600dp）聊天左纵栏——照 HubRail/FasFox 语态（v1.1.21）：
+ * 横排品牌行（GGUF-Server + 服务灯）+ 横排条目（图标+文字一行一条，选中=浅赤陶底圆角横条）
+ * + 底部 foot 信息块（服务状态+当前模型）。顶栏五槽位与插件直显区的行为语义原样迁移：
+ * 启动台开=赤陶高亮、插件条目=门户选项卡选中态、服务灯绿=运行中/橙=未就绪（busy 呼吸闪烁）。
+ */
+@Composable
+private fun ChatRail(
+    topbarPlugins: List<PluginRecord>,
+    portalOpen: Boolean,
+    portalTabId: String?,
+    onPortalTab: (String) -> Unit,
+    launchpadOpen: Boolean,
+    onLaunchpad: () -> Unit,
+    onHistory: () -> Unit,
+    onNewChat: () -> Unit,
+    onConfig: () -> Unit,
+    serverRunning: Boolean,
+    busyLight: Boolean,
+    onSettings: () -> Unit,
+    model: String,
+) {
+    val tones = LocalWarmTones.current
+    Column(
+        Modifier.width(200.dp).fillMaxHeight().background(tones.card).statusBarsPadding()
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "GGUF-Server", fontSize = 17.sp, fontWeight = FontWeight.Bold,
+                color = tones.accent, maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            ServerIconWithLight(
+                iconTint = tones.muted,
+                lightColor = if (serverRunning) tones.ok else tones.warn,
+                ringColor = tones.card,
+                blinking = busyLight
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        topbarPlugins.forEach { rec ->
+            val active = portalOpen && portalTabId == rec.manifest.id
+            ChatRailItem(
+                active = active,
+                onClick = { onPortalTab(rec.manifest.id) },
+                label = rec.manifest.name
+            ) {
+                PluginIcon(rec.dir, size = 20.dp, tint = if (active) tones.accent else tones.muted)
+            }
+        }
+        if (topbarPlugins.isNotEmpty()) {
+            HorizontalDivider(color = tones.line2, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+        }
+        ChatRailItem(launchpadOpen, onLaunchpad, "启动台") {
+            Icon(Icons.Outlined.GridView, null, Modifier.size(20.dp), tint = if (launchpadOpen) tones.accent else tones.muted)
+        }
+        ChatRailItem(false, onHistory, "历史会话") {
+            Icon(Icons.AutoMirrored.Outlined.ListAlt, null, Modifier.size(20.dp), tint = tones.muted)
+        }
+        ChatRailItem(false, onNewChat, "新对话") {
+            Icon(Icons.Outlined.AddComment, null, Modifier.size(20.dp), tint = tones.muted)
+        }
+        ChatRailItem(false, onConfig, "模型配置") {
+            Icon(Icons.Outlined.Tune, null, Modifier.size(20.dp), tint = tones.muted)
+        }
+        ChatRailItem(false, onSettings, "设置") {
+            Icon(Icons.Outlined.Dns, null, Modifier.size(20.dp), tint = tones.muted)
+        }
+        Spacer(Modifier.weight(1f))
+        HorizontalDivider(color = tones.line)
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp)
+                .background(tones.bg, RoundedCornerShape(8.dp))
+                .padding(10.dp, 8.dp)
+        ) {
+            Text(
+                if (serverRunning) "服务运行中" else "服务未就绪",
+                fontSize = 11.sp, color = tones.ink2, lineHeight = 17.sp
+            )
+            Text(
+                model, fontSize = 10.sp, color = tones.faint, lineHeight = 15.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatRailItem(
+    active: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    icon: @Composable () -> Unit,
+) {
+    val tones = LocalWarmTones.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) tones.accentSoft else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(9.dp, 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        icon()
+        Text(
+            label, fontSize = 13.5.sp,
+            color = if (active) tones.accent else tones.muted,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
     }
 }

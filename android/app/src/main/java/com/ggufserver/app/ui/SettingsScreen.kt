@@ -37,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.PlayArrow
@@ -84,6 +85,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
@@ -127,6 +129,11 @@ fun SettingsScreen(vm: MainViewModel = viewModel(), onBack: (() -> Unit)? = null
     BackHandler(enabled = showPluginManager) { showPluginManager = false }
     if (showPluginManager) {
         PluginManagerScreen(onBack = { showPluginManager = false })
+    }
+    var showHub by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showHub) { showHub = false }
+    if (showHub) {
+        ModelHubScreen(onBack = { showHub = false })
         return
     }
 
@@ -182,13 +189,13 @@ fun SettingsScreen(vm: MainViewModel = viewModel(), onBack: (() -> Unit)? = null
                 .padding(inner)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 4.dp),
+                .padding(horizontal = if (LocalConfiguration.current.screenWidthDp >= 600) 36.dp else 16.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             val callName = if (state == ServerState.RUNNING) activeAlias else vm.modelName
             ServiceGroup(state, activeModel, if (state == ServerState.RUNNING) servedPort else (vm.port.toIntOrNull() ?: 8080), callName)
             StorageGroup(vm)
-            ModelsGroup(vm, enabled = idle, onPick = { picker.launch(arrayOf("*/*")) })
+            ModelsGroup(vm, enabled = idle, onPick = { picker.launch(arrayOf("*/*")) }, onOpenHub = { showHub = true })
             EmbeddingGroup(vm, enabled = idle)
             ConfigGroup(vm, enabled = idle)
             ActionButton(state) { if (idle) vm.startServer() else vm.stopServer() }
@@ -409,7 +416,10 @@ private fun ServiceGroup(state: ServerState, activeModel: String?, port: Int, ca
             }
         }
         HorizontalDivider(color = tones.line)
-        Text("API 地址（OpenAI 兼容 · 局域网）", fontSize = 12.5.sp, color = tones.muted)
+        Text("API 地址（OpenAI 兼容）", fontSize = 12.5.sp, color = tones.muted)
+        Text("本机调用（localhost）", fontSize = 11.sp, color = tones.faint)
+        CopyableField("http://localhost:$port/v1", clipboard)
+        Text("局域网其他设备（IP）", fontSize = 11.sp, color = tones.faint)
         CopyableField(base, clipboard)
         Text("模型调用名（API 的 model 字段填这个）", fontSize = 12.5.sp, color = tones.muted)
         CopyableField(model, clipboard)
@@ -542,7 +552,7 @@ private fun StorageGroup(vm: MainViewModel) {
 }
 
 @Composable
-private fun ModelsGroup(vm: MainViewModel, enabled: Boolean, onPick: () -> Unit) {
+private fun ModelsGroup(vm: MainViewModel, enabled: Boolean, onPick: () -> Unit, onOpenHub: () -> Unit) {
     val tones = LocalWarmTones.current
     Group(
         Icons.Outlined.Memory, "模型",
@@ -554,8 +564,9 @@ private fun ModelsGroup(vm: MainViewModel, enabled: Boolean, onPick: () -> Unit)
             ) { onPick() }
         }
     ) {
+        WarmButton("模型市场（浏览 / 搜索 / 下载 GGUF）", icon = Icons.Outlined.CloudDownload) { onOpenHub() }
         if (vm.models.isEmpty()) {
-            Text("此位置还没有模型。点「上传 GGUF」导入，或把 .gguf 直接拷到该目录。", fontSize = 12.5.sp, lineHeight = 18.sp, color = tones.muted)
+            Text("此位置还没有模型。可在「模型市场」直接下载，点「上传 GGUF」导入，或把 .gguf 直接拷到该目录。", fontSize = 12.5.sp, lineHeight = 18.sp, color = tones.muted)
         } else {
             vm.models.forEach { model ->
                 SelectRow(
@@ -723,7 +734,7 @@ private fun ConfigGroup(vm: MainViewModel, enabled: Boolean) {
             WarmField("线程数 (-t)", vm.threads, enabled, numeric = true) { vm.threads = it }
             EngineBenchRow(vm, enabled)
             WarmField("GPU 层数 (-ngl，0=纯 CPU；测评会自动填)", vm.nGpuLayers, enabled, numeric = true) { vm.nGpuLayers = it }
-            SwitchRow("禁用内存映射（--no-mmap）", "模型放在 SD 卡加载失败时可开启", vm.noMmap, enabled) { vm.noMmap = it }
+            SwitchRow("禁用内存映射（--load-mode none）", "模型放在 SD 卡加载失败时可开启", vm.noMmap, enabled) { vm.noMmap = it }
             WarmField("API Key（可选，留空不鉴权）", vm.apiKey, enabled) { vm.apiKey = it }
         }
     }
@@ -932,3 +943,4 @@ private fun openAllFilesAccess(context: android.content.Context) {
         runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
     }
 }
+

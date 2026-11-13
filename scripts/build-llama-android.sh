@@ -84,7 +84,7 @@ cmake --build "$BUILD_DIR" --target llama-server llama-bench --config Release -j
 
 # ---- 4. collect into jniLibs ----------------------------------------------
 echo ">> 清理旧的 native 产物 ..."
-rm -f "$JNILIBS_DIR"/*.so
+rm -f "$JNILIBS_DIR"/libggml*.so "$JNILIBS_DIR"/libllama*.so "$JNILIBS_DIR"/libmtmd.so
 # 可执行文件改名 lib*.so（Android 仅 nativeLibraryDir 可执行）
 cp "$BUILD_DIR/bin/llama-server" "$JNILIBS_DIR/libllamaserver.so"
 cp "$BUILD_DIR/bin/llama-bench"  "$JNILIBS_DIR/libllamabench.so"
