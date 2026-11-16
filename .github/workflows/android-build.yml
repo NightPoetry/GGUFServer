@@ -40,7 +40,7 @@ jobs:
 
       - name: Build llama.cpp native libs (CPU only — CI 只验证能编译，不需要 Vulkan)
         env:
-          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ANDROID_NDK: /usr/local/lib/android/sdk/ndk/26.3.11579264
           WITH_VULKAN: "0"
         run: ./scripts/build-llama-android.sh
 
