@@ -36,3 +36,9 @@ debug/*.apk
 
 # packaged code-backup archives (physical rollback artifacts kept alongside git)
 _代码备份_*.tar.gz
+
+# Kotlin build session dir
+android/.kotlin/
+
+# Kotlin build session dir
+android/.kotlin/
