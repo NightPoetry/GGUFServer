@@ -1880,9 +1880,8 @@ private fun Composer(vm: ChatViewModel, model: String, ready: Boolean) {
                     model,
                     fontSize = 12.sp, color = tones.faint,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 2.dp, end = 8.dp)
+                    modifier = Modifier.weight(1f).padding(start = 2.dp, end = 8.dp)
                 )
-                Spacer(Modifier.weight(1f))
                 val canSend = vm.input.isNotBlank() && !vm.busy && ready
                 Box(
                     Modifier

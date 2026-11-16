@@ -103,6 +103,8 @@ class HubState {
     var ram by mutableStateOf(0L)
     var disk by mutableStateOf(0L)
     var expanded by mutableStateOf(emptySet<String>())
+    var endReached by mutableStateOf(false)
+    var loadingMore by mutableStateOf(false)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val judged = ConcurrentHashMap<String, HubJudge.Judgment>()
@@ -130,6 +132,41 @@ class HubState {
         load()
     }
 
+    /** 触底加载下一页：以现有行数为 skip，追加去重；判定循环复用（独立标志不串 load 的 seq）。 */
+    fun loadMore() {
+        if (loading || loadingMore || endReached || rows.isEmpty()) return
+        loadingMore = true
+        val ctx = appContext ?: run { loadingMore = false; return }
+        scope.launch {
+            try {
+                val models = withContext(Dispatchers.IO) {
+                    if (tab == HubTab.SEARCH) HubApi.search(keyword.trim(), 30, rows.size) else HubApi.popular(30, rows.size)
+                }
+                val known = rows.map { it.model.id }.toSet()
+                val fresh = models.filter { it.id !in known }
+                if (fresh.isEmpty()) {
+                    endReached = true
+                } else {
+                    val newRows = fresh.map { HubRow(it, judged[it.id], false) }
+                    rows = rows + newRows
+                    for (m in fresh) {
+                        val j = try {
+                            judgeRepo(m.id)
+                        } catch (e: Exception) {
+                            rows = rows.map { if (it.model.id == m.id) it.copy(failed = true) else it }
+                            continue
+                        }
+                        rows = rows.map { if (it.model.id == m.id) it.copy(judgment = j) else it }
+                    }
+                }
+            } catch (e: Exception) {
+                ServerBus.appendLog("[模型市场] 加载更多失败：${e.message}")
+            } finally {
+                loadingMore = false
+            }
+        }
+    }
+
     fun submitSearch() {
         if (tab == HubTab.SEARCH && keyword.isNotBlank()) load()
     }
@@ -137,6 +174,8 @@ class HubState {
     fun load() {
         val ctx = appContext ?: return
         val mySeq = ++seq
+        endReached = false
+        loadingMore = false
         scope.launch {
             loading = true
             status = "请求列表中…"
@@ -506,6 +545,21 @@ private fun HubMainColumn(
             items(hub.rows, key = { it.model.id }) { row ->
                 HubRowItem(hub, row)
                 Spacer(Modifier.height(2.dp))
+            }
+            if (hub.rows.isNotEmpty()) {
+                item(key = "footer") {
+                    when {
+                        hub.loadingMore -> Row(
+                            Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) { Text("加载更多…", fontSize = 11.sp, color = tones.muted) }
+                        hub.endReached -> Row(
+                            Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) { Text("已经到底了", fontSize = 11.sp, color = tones.faint) }
+                        else -> androidx.compose.runtime.LaunchedEffect(Unit) { hub.loadMore() }
+                    }
+                }
             }
         }
     }

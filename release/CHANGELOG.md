@@ -2,6 +2,7 @@
 
 每个版本号后跟该版本主要升级备注（打包时由 scripts/release.sh 自动追加）。
 
+- **v1.1.22**（2026-11-17）— **模型市场分页+多线程分片下载+输入卡发送按钮修复**——①热门/搜索接入 HF 分页（skip 参数，每页 30 条），列表触底自动加载下一页（底部「加载更多…/已经到底了」状态行），不再只看到前 30 条推荐；②下载器重构为 4 连接分片并行下载（≥8MB 且服务器支持 Range 时启用；分片文件 .part0..3 各自独立断点续传，全部完成后顺序合并并校验；分片失败自动回退单线程断点续传），hf-mirror 单连接限速场景速度显著提升；③修复长模型名把输入卡发送按钮挤出屏幕（模型名 Text 加 weight 让位，发送按钮固定 34dp 永在，用户报障）；④搜索框对齐 ChatScreen 已验证形态（cursorBrush/decorationBox Box 包裹/键盘 Search 键直提交/胶囊化）。JVM 单测 20 项（Hub）全绿。
 - **v1.1.21**（2026-11-16）— **聊天页宽屏左纵栏 ChatRail**——≥600dp 外层 Row=ChatRail(200dp)+1dp 分隔线+Scaffold(weight1f)：品牌行(GGUF-Server+服务灯,绿=运行中/橙=未就绪,busy 呼吸闪烁)+插件直显区(panelTopbar=true 逐条,激活=accentSoft 底)+固定条目五条(启动台/历史会话/新对话/模型配置/设置)+foot 信息块(服务状态+当前模型名);窄屏(<600dp)顶栏原样,if(!isWide) TopAppBar 整段只在窄屏组合;交互语义与顶栏逐一对齐(launchpadOpen 取反/drawerState.open/vm.newChat/configDrawerState.open/onOpenSettings),消息区横滑开抽屉+顶部热区下拉开门户宽窄屏都保留;照 HubRail/FasFox 语态(用户令「说着平板左侧纵栏,但是所有的菜单还是在顶部」补 v1.1.20 只做了市场页纵栏的账)。模拟器实拍:768 平板纵栏+375 窄屏回归+桌面 768 封顶列,发布视频 v4.1 s5/s6 已换实拍;JVM 单测 64 项全绿;真机验证待回填。
 - **v1.1.20**（2026-11-04）— 多尺寸自适应：hubLayout 断点纯函数（<600dp 顶栏 / ≥600dp 左纵栏）+内容列 720dp 封顶+MainActivity 应用级 760dp 封顶列；HubLayoutTest 3 项钉断点。
 - **v1.1.19**（2026-11-04）— 模型市场转正原生内置页（ui/ModelHubScreen.kt，热门/搜索/判定/断点续传下载全保留，插件壳与桥口回撤）；服务地址双形态展示（本机 localhost 与局域网 IP 并列可复制）。

@@ -18,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -86,15 +87,15 @@ object HubApi {
         URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
     /** 热门列表：GGUF 库内按下载量降序（浏览器模式的默认页）。 */
-    fun listPopularUrl(limit: Int): String =
-        "$BASE/api/models?filter=gguf&sort=downloads&direction=-1&limit=${limit.coerceIn(1, 100)}"
+    fun listPopularUrl(limit: Int, skip: Int = 0): String =
+        "$BASE/api/models?filter=gguf&sort=downloads&direction=-1&limit=${limit.coerceIn(1, 100)}" + if (skip > 0) "&skip=$skip" else ""
 
     /**
      * 关键字搜索：**不带排序与过滤**——设计原话「直接搜索的话就不过滤了，搜出什么来就是什么」，
      * 顺序交给站点的相关性排序，结果也不做带不得动的隐藏（只打标记）。
      */
-    fun searchUrl(keyword: String, limit: Int): String =
-        "$BASE/api/models?search=${enc(keyword)}&limit=${limit.coerceIn(1, 100)}"
+    fun searchUrl(keyword: String, limit: Int, skip: Int = 0): String =
+        "$BASE/api/models?search=${enc(keyword)}&limit=${limit.coerceIn(1, 100)}" + if (skip > 0) "&skip=$skip" else ""
 
     // repoId 的 "/" 是路径分隔符，必须保留原样（hf-mirror 按 path 路由，%2F 会 404）——
     // 只按段编码段内字符（模拟器真机验证抓出过这个 bug，见设计文档04 增补2 验证节）。
@@ -121,11 +122,11 @@ object HubApi {
     }
 
     /** 热门列表（GGUF 库内下载量降序）。 */
-    fun popular(limit: Int = 30): List<HubModel> = parseModels(fetchBody(listPopularUrl(limit)))
+    fun popular(limit: Int = 30, skip: Int = 0): List<HubModel> = parseModels(fetchBody(listPopularUrl(limit, skip)))
 
     /** 关键字搜索（无 sort 无 filter——设计原话「搜出什么来就是什么」）。 */
-    fun search(keyword: String, limit: Int = 30): List<HubModel> =
-        parseModels(fetchBody(searchUrl(keyword, limit)))
+    fun search(keyword: String, limit: Int = 30, skip: Int = 0): List<HubModel> =
+        parseModels(fetchBody(searchUrl(keyword, limit, skip)))
 
     /** 单仓 .gguf 文件清单（已排除目录项与 mmproj）。 */
     fun tree(repoId: String): List<HubFile> = parseTree(fetchBody(treeUrl(repoId)))
@@ -153,8 +154,8 @@ object HubApi {
             val path = o.optString("path").trim()
             if (!path.endsWith(".gguf", ignoreCase = true)) continue
             if (path.contains("mmproj", ignoreCase = true)) continue
-            // imatrix = 量化校准的重要性矩阵统计文件（unsloth 等随仓库附带），不可运行，
-            // 且体积小（KB~MB 级）按大小判定必得「可运行」——曾在 27B 仓库抢走推荐位（用户报障）
+            // imatrix = 量化校准的重要性矩阵统计（unsloth 等附带），不可运行且体积小，
+            // 按大小判定必得「可运行」并抢走推荐位（用户报障：27B 仓库 13MB imatrix 判 ok）
             if (path.contains("imatrix", ignoreCase = true)) continue
             val size = o.optLong("size", o.optLong("lfs.size", 0L))
             out.add(HubFile(path, size))
@@ -243,7 +244,7 @@ object HubJudge {
         val verdicts = files
             .map { FileVerdict(it.first, it.second, parseQuant(it.first), verdictOf(it.second, totalRam, freeDisk)) }
             .sortedBy { rankOf(it.name) } // 轻→重
-        // best 只认有效量化命名的文件（quant!=null）：认不出的（如残留校准文件）不进推荐位
+        // best 只认有效量化命名的文件：认不出的（如残留校准文件）不进推荐位
         val runnablePool = verdicts.filter { it.quant != null }
         val best = runnablePool.firstOrNull { it.verdict == "ok" }
             ?: runnablePool.firstOrNull { it.verdict == "tight" }
@@ -345,8 +346,30 @@ object ModelHubDownloader {
 
     private suspend fun downloadTo(urlStr: String, target: File, part: File): File {
         target.parentFile?.mkdirs()
-        var have = if (part.exists()) part.length() else 0L
         val total = _state.value.total
+
+        // 多线程分片：已知大小且 ≥8MB 时 4 连接并行（hf-mirror 支持 Range）；
+        // 分片文件 "<part>.0..3" 各自独立断点续传，全片完成后顺序合并；失败回退单线程。
+        if (total >= 8L * 1024 * 1024) {
+            runCatching { return downloadMulti(urlStr, target, part, total) }.onFailure { e ->
+                if (e.message == "cancelled") throw e
+                ServerBus.appendLog("[模型市场] 分片下载异常（${e.message}），回退单线程断点续传")
+                chunkFiles(part).forEach { if (it.exists()) it.delete() }
+            }
+        }
+        return downloadSingle(urlStr, target, part)
+    }
+
+    private fun chunkFiles(part: File): List<File> =
+        (0 until CHUNKS).map { File(part.parentFile, "${part.name}.$it") }
+
+    private fun chunkSum(parts: List<File>): Long = parts.sumOf { if (it.exists()) it.length() else 0L }
+
+    private const val CHUNKS = 4
+
+    private suspend fun downloadSingle(urlStr: String, target: File, part: File): File {
+        val total = _state.value.total
+        var have = if (part.exists()) part.length() else 0L
 
         var attempt = 0
         while (true) {
@@ -426,7 +449,111 @@ object ModelHubDownloader {
         }
     }
 
-    private fun formatBytes(b: Long): String = when {
+    private suspend fun downloadMulti(urlStr: String, target: File, part: File, total: Long): File = kotlinx.coroutines.coroutineScope {
+        val parts = chunkFiles(part)
+        val per = total / CHUNKS
+        val ranges = (0 until CHUNKS).map { i ->
+            val from = i * per
+            val to = if (i == CHUNKS - 1) total - 1 else (i + 1) * per - 1
+            from to to
+        }
+        val lastTick = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+        val lastBytes = java.util.concurrent.atomic.AtomicLong(chunkSum(parts))
+        val speed = java.util.concurrent.atomic.AtomicLong(_state.value.speedBps)
+
+        val ticker = launch {
+            while (true) {
+                delay(600)
+                val now = System.currentTimeMillis()
+                val have = chunkSum(parts)
+                val dt = now - lastTick.get()
+                if (dt >= 400) {
+                    val inst = ((have - lastBytes.get()) * 1000) / dt
+                    val prev = speed.get()
+                    speed.set(if (prev <= 0) inst else (prev * 2 + inst) / 3)
+                    _state.value = _state.value.copy(received = have, speedBps = speed.get())
+                    lastTick.set(now); lastBytes.set(have)
+                }
+            }
+        }
+        val failures = java.util.concurrent.CopyOnWriteArrayList<String>()
+        (0 until CHUNKS).map { i ->
+            launch {
+                try {
+                    downloadChunk(urlStr, parts[i], ranges[i].first, ranges[i].second)
+                } catch (e: Exception) {
+                    failures.add("分片$i: ${e.message}")
+                }
+            }
+        }
+        // 等全部分片结束（轮询聚合；分片失败/取消即退出）
+        while (chunkSum(parts) < total && failures.isEmpty() && !cancelFlag.get()) delay(500)
+        ticker.cancel()
+        if (cancelFlag.get()) throw RuntimeException("cancelled")
+        if (failures.isNotEmpty()) throw RuntimeException(failures.first())
+        // 校验+合并（顺序 part0..3 拼接即完整文件）
+        parts.forEachIndexed { i, p ->
+            val expectLen = ranges[i].second - ranges[i].first + 1
+            require(p.exists() && p.length() == expectLen) { "分片$i 不完整（${if (p.exists()) p.length() else -1}/$expectLen）" }
+        }
+        var final = target
+        if (final.exists()) {
+            val base = target.name.removeSuffix(".gguf").removeSuffix(".GGUF")
+            var i = 1
+            while (File(target.parentFile, "$base ($i).gguf").exists()) i++
+            final = File(target.parentFile, "$base ($i).gguf")
+        }
+        FileOutputStream(final).use { out ->
+            parts.forEach { p -> p.inputStream().use { it.copyTo(out, 256 * 1024) } }
+        }
+        parts.forEach { it.delete() }
+        part.delete()   // 清掉可能残留的单线程 .part
+        return@coroutineScope final
+    }
+
+    /** 单分片：区间 Range 下载，分片文件自带断点（长度=已收）。服务器不支持 Range（回 200）即抛错走单线程回退。 */
+    private suspend fun downloadChunk(urlStr: String, file: File, from: Long, to: Long) {
+        val want = to - from + 1
+        var have = if (file.exists()) file.length() else 0L
+        if (have > want) { file.delete(); have = 0L }
+        var attempt = 0
+        while (have < want) {
+            attempt++
+            if (attempt > 8) throw RuntimeException("分片重试次数用尽（已收 $have/$want）")
+            if (cancelFlag.get()) throw RuntimeException("cancelled")
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 60_000
+                instanceFollowRedirects = true
+                setRequestProperty("Range", "bytes=${from + have}-$to")
+            }
+            val code = conn.responseCode
+            if (code !in 200..299) { conn.disconnect(); throw RuntimeException("HTTP $code") }
+            if (code != 206) { conn.disconnect(); throw RuntimeException("分片下载不被支持（服务器未回 206）") }
+            RandomAccessFile(file, "rw").use { raf ->
+                raf.seek(have)
+                conn.inputStream.use { input ->
+                    val buf = ByteArray(128 * 1024)
+                    while (have < want) {
+                        if (cancelFlag.get()) throw RuntimeException("cancelled")
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        val cap = (want - have).toInt().coerceAtMost(n)
+                        raf.write(buf, 0, cap)
+                        have += cap
+                    }
+                }
+            }
+            conn.disconnect()
+            if (have < want) {
+                delay(3000)
+                ServerBus.appendLog("[模型市场] 分片中断续传（${file.name}，已收 ${formatBytes(have)}/${formatBytes(want)}）")
+            }
+        }
+    }
+
+    private fun formatBytes(b: Long): String
+ = when {
         b >= 1L shl 30 -> String.format("%.1f GB", b / 1073741824.0)
         b >= 1L shl 20 -> String.format("%.0f MB", b / 1048576.0)
         b >= 1L shl 10 -> String.format("%.0f KB", b / 1024.0)
