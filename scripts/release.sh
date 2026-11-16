@@ -31,6 +31,9 @@ cd "$PROJ/android"
 
 cp app/build/outputs/apk/release/app-release.apk "$OUT"
 
+# 发行锚点 tag（回滚用：git checkout release/vX.Y.Z 或对应 APK 归档）
+git tag "release/v$VER" -m "发行锚点 v$VER: $NOTE" 2>/dev/null || git tag -f "release/v$VER" -m "发行锚点 v$VER: $NOTE"
+
 # 记录本版本升级备注到 CHANGELOG（版本号后跟主要升级备注，最新在最上）
 CHANGELOG="$RELEASE_DIR/CHANGELOG.md"
 # 新建时写 4 行头（标题/空/说明/空），第 4 行的空行是新条目的插入锚点
