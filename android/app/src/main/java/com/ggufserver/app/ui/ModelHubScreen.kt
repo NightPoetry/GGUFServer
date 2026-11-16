@@ -25,9 +25,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Whatshot
 import androidx.compose.material3.HorizontalDivider
@@ -466,23 +470,27 @@ private fun HubMainColumn(
                     onValueChange = { hub.keyword = it },
                     singleLine = true,
                     textStyle = TextStyle(fontSize = 13.sp, color = tones.ink),
+                    cursorBrush = SolidColor(tones.accent),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { hub.submitSearch() }),
                     modifier = Modifier
                         .weight(1f)
-                        .background(tones.card, RoundedCornerShape(8.dp))
-                        .border(1.dp, tones.line, RoundedCornerShape(8.dp))
-                        .padding(8.dp, 10.dp),
+                        .background(tones.card, RoundedCornerShape(999.dp))
+                        .border(1.dp, tones.line, RoundedCornerShape(999.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                     decorationBox = { inner ->
-                        if (hub.keyword.isEmpty()) Text("输入关键字，如 qwen3 / minicpm5 / coder", fontSize = 12.5.sp, color = tones.faint)
-                        inner
+                        Box {
+                            if (hub.keyword.isEmpty()) Text("输入关键字，如 qwen3 / minicpm5 / coder", fontSize = 12.5.sp, color = tones.faint, maxLines = 1)
+                            inner
+                        }
                     }
                 )
                 Text(
-                    "搜索", fontSize = 13.sp, color = tones.card,
+                    "搜索", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = tones.card,
                     modifier = Modifier
-                        .background(tones.accent, RoundedCornerShape(8.dp))
+                        .background(tones.accent, RoundedCornerShape(999.dp))
                         .clickable { hub.submitSearch() }
-                        .padding(10.dp, 10.dp)
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
                 )
             }
         }
@@ -531,11 +539,11 @@ private fun HubBadge(verdict: String) {
         else -> "带不动" to tones.bad
     }
     Text(
-        label, fontSize = 10.5.sp, color = color,
+        label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = color,
         modifier = Modifier
-            .background(color.copy(alpha = 0.08f), RoundedCornerShape(999.dp))
-            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
-            .padding(6.dp, 1.dp)
+            .background(color.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 9.dp, vertical = 2.5.dp)
     )
 }
 
@@ -543,11 +551,11 @@ private fun HubBadge(verdict: String) {
 private fun HubChip(text: String) {
     val tones = LocalWarmTones.current
     Text(
-        text, fontSize = 10.5.sp, color = tones.muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        text, fontSize = 11.sp, color = tones.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis,
         modifier = Modifier
             .background(tones.card, RoundedCornerShape(999.dp))
             .border(1.dp, tones.line, RoundedCornerShape(999.dp))
-            .padding(6.dp, 1.dp)
+            .padding(horizontal = 9.dp, vertical = 2.5.dp)
     )
 }
 
@@ -591,22 +599,35 @@ private fun HubRowItem(hub: HubState, row: HubRow) {
                     }
                     if (j.runnable && j.bestName != null) {
                         Text(
-                            "下载", fontSize = 12.sp, color = tones.card,
+                            "下载", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, color = tones.card,
                             modifier = Modifier
-                                .background(tones.accent, RoundedCornerShape(8.dp))
+                                .background(tones.accent, RoundedCornerShape(999.dp))
                                 .clickable { hub.startDownload(context, row.model.id, j.bestName, j.bestSize) }
-                                .padding(12.dp, 5.dp)
+                                .padding(horizontal = 14.dp, vertical = 4.dp)
                         )
                     }
                 }
             }
         }
         if (j != null && j.files.isNotEmpty()) {
-            Text(
-                if (row.model.id in hub.expanded) "收起全部 ${j.files.size} 个量化" else "全部 ${j.files.size} 个量化",
-                fontSize = 11.sp, color = tones.accent,
-                modifier = Modifier.padding(top = 5.dp).clickable { hub.toggleExpand(row.model.id) }
-            )
+            Row(
+                Modifier.padding(top = 6.dp)
+                    .background(tones.card, RoundedCornerShape(999.dp))
+                    .border(1.dp, tones.line, RoundedCornerShape(999.dp))
+                    .clickable { hub.toggleExpand(row.model.id) }
+                    .padding(horizontal = 10.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    if (row.model.id in hub.expanded) "收起 ${j.files.size} 个量化" else "全部 ${j.files.size} 个量化",
+                    fontSize = 11.sp, color = tones.ink2
+                )
+                Icon(
+                    if (row.model.id in hub.expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null, Modifier.size(14.dp), tint = tones.muted
+                )
+            }
             if (row.model.id in hub.expanded) {
                 j.files.forEach { f ->
                     Row(
@@ -623,12 +644,12 @@ private fun HubRowItem(hub: HubState, row: HubRow) {
                         HubBadge(f.verdict)
                         if (f.verdict != "no") {
                             Text(
-                                "下", fontSize = 11.sp, color = tones.card,
+                                "下载", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = tones.card,
                                 modifier = Modifier
-                                    .padding(start = 5.dp)
-                                    .background(tones.accent, RoundedCornerShape(6.dp))
+                                    .padding(start = 6.dp)
+                                    .background(tones.accent, RoundedCornerShape(999.dp))
                                     .clickable { hub.startDownload(context, row.model.id, f.name, f.size) }
-                                    .padding(7.dp, 2.dp)
+                                    .padding(horizontal = 10.dp, vertical = 2.dp)
                             )
                         }
                     }

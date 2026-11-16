@@ -122,6 +122,21 @@ class HubJudgeTest {
     }
 
     @Test
+    fun `imatrix校准文件不进推荐位_真量化按位宽判定`() {
+        // 用户报障：27B 仓库里 13MB 的 IMATRIX-unsloth.gguf 被判「可运行」并抢走推荐位
+        // （它不是模型本体，是量化校准的重要性矩阵统计，不可运行）
+        val files = listOf(
+            "Qwen3-27B.IMATRIX-unsloth.gguf" to 13L * 1024 * 1024,
+            "Qwen3-27B-Q2_K.gguf" to 7L * 1024 * 1024 * 1024, // ≤8G RAM 但 >0.75×RAM = 勉强（tight）
+        )
+        val j = HubJudge.judge(files, ram8g, diskBig)
+        val imatrix = j.files.first { it.name.contains("IMATRIX") }
+        assertEquals("ok", imatrix.verdict) // 大小判定本身没错：13MB 确实装得下
+        // 但推荐位不能给它——best 只认有效量化命名
+        assertEquals("Qwen3-27B-Q2_K.gguf", j.bestName)
+    }
+
+    @Test
     fun `toJson形状完整`() {
         val j = HubJudge.judge(listOf("m-Q4_K_M.gguf" to 1024L), ram8g, diskBig)
         val o = j.toJson()

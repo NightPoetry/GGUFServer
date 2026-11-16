@@ -129,6 +129,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel(), onBack: (() -> Unit)? = null
     BackHandler(enabled = showPluginManager) { showPluginManager = false }
     if (showPluginManager) {
         PluginManagerScreen(onBack = { showPluginManager = false })
+        return
     }
     var showHub by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showHub) { showHub = false }

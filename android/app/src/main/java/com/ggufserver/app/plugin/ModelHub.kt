@@ -153,6 +153,9 @@ object HubApi {
             val path = o.optString("path").trim()
             if (!path.endsWith(".gguf", ignoreCase = true)) continue
             if (path.contains("mmproj", ignoreCase = true)) continue
+            // imatrix = 量化校准的重要性矩阵统计文件（unsloth 等随仓库附带），不可运行，
+            // 且体积小（KB~MB 级）按大小判定必得「可运行」——曾在 27B 仓库抢走推荐位（用户报障）
+            if (path.contains("imatrix", ignoreCase = true)) continue
             val size = o.optLong("size", o.optLong("lfs.size", 0L))
             out.add(HubFile(path, size))
         }
@@ -240,8 +243,10 @@ object HubJudge {
         val verdicts = files
             .map { FileVerdict(it.first, it.second, parseQuant(it.first), verdictOf(it.second, totalRam, freeDisk)) }
             .sortedBy { rankOf(it.name) } // 轻→重
-        val best = verdicts.firstOrNull { it.verdict == "ok" }
-            ?: verdicts.firstOrNull { it.verdict == "tight" }
+        // best 只认有效量化命名的文件（quant!=null）：认不出的（如残留校准文件）不进推荐位
+        val runnablePool = verdicts.filter { it.quant != null }
+        val best = runnablePool.firstOrNull { it.verdict == "ok" }
+            ?: runnablePool.firstOrNull { it.verdict == "tight" }
         return Judgment(
             files = verdicts,
             bestName = best?.name,
