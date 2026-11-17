@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ggufserver.app.data.ModelFile
+import com.ggufserver.app.data.GgufProbe
 import com.ggufserver.app.data.ModelStore
 import com.ggufserver.app.data.SettingsStore
 import com.ggufserver.app.model.ServerConfig
@@ -62,6 +63,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 向量模型（嵌入服务）选中的文件；null = 不启用。与主模型共用同一批 .gguf，路径持久化在 settings。 */
     var selectedEmbedding by mutableStateOf<ModelFile?>(null)
         private set
+    // 模型类型自动识别（GgufProbe 读 GGUF 元数据：pooling_type/BERT 系架构=向量模型）
+    var modelKinds by mutableStateOf<Map<String, GgufProbe.Kind>>(emptyMap())
+    var showAllInEmbeddingList by mutableStateOf(false)
 
     /** 嵌入服务运行状态（随主服务拉起/停止），设置页向量模型卡直接订阅。 */
     val embeddingStatus get() = EmbeddingServer.status
@@ -144,7 +148,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 向量模型：按持久化路径找回（文件被删了就退回「不启用」）
         val embPath = settings.embeddingModelPath
         selectedEmbedding = if (embPath.isBlank()) null else models.find { it.file.absolutePath == embPath }
+        // 模型类型自动识别：后台逐个读 GGUF 头（毫秒级/个，不碰张量区）
+        viewModelScope.launch(Dispatchers.IO) {
+            val map = HashMap<String, GgufProbe.Kind>()
+            for (m in models) {
+                map[m.file.absolutePath] = GgufProbe.kindOf(GgufProbe.probe(m.file))
+            }
+            modelKinds = map
+        }
     }
+
+    fun kindOf(model: ModelFile): GgufProbe.Kind = modelKinds[model.file.absolutePath] ?: GgufProbe.Kind.UNKNOWN
 
     fun selectModel(m: ModelFile) {
         selected = m

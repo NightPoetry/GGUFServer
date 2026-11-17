@@ -100,6 +100,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ggufserver.app.data.GgufProbe
 import com.ggufserver.app.MainViewModel
 import com.ggufserver.app.ServerBus
 import com.ggufserver.app.ServerState
@@ -570,14 +571,37 @@ private fun ModelsGroup(vm: MainViewModel, enabled: Boolean, onPick: () -> Unit,
             Text("此位置还没有模型。可在「模型市场」直接下载，点「上传 GGUF」导入，或把 .gguf 直接拷到该目录。", fontSize = 12.5.sp, lineHeight = 18.sp, color = tones.muted)
         } else {
             vm.models.forEach { model ->
-                SelectRow(
-                    title = model.name,
-                    meta = formatBytes(model.sizeBytes),
-                    selected = vm.selected?.file == model.file,
-                    enabled = enabled,
-                    onSelect = { vm.selectModel(model) },
-                    trailing = { DeleteIcon(enabled) { vm.requestDelete(model) } }
-                )
+                val isEmbedding = vm.kindOf(model) == GgufProbe.Kind.EMBEDDING
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isEmbedding) {
+                                Text("向量", fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                                    color = tones.accent,
+                                    modifier = Modifier
+                                        .background(tones.accentSoft, RoundedCornerShape(999.dp))
+                                        .border(1.dp, tones.accent.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+                                        .padding(horizontal = 7.dp, vertical = 1.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(model.name, fontSize = 13.sp, color = if (vm.selected?.file == model.file) tones.accent else tones.ink,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Text(formatBytes(model.sizeBytes) + if (isEmbedding) " · 向量模型不适合对话，请在「向量模型（嵌入服务）」组启用" else "",
+                            fontSize = 11.sp, color = tones.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    DeleteIcon(enabled) { vm.requestDelete(model) }
+                    Spacer(Modifier.width(6.dp))
+                    SelectRow(
+                        title = if (vm.selected?.file == model.file) "对话中" else "选用",
+                        meta = null,
+                        selected = vm.selected?.file == model.file,
+                        enabled = enabled,
+                        onSelect = { vm.selectModel(model) }
+                    )
+                }
             }
             WarmField("模型调用名（API 的 model 字段，可自由修改）", vm.modelName, enabled) { vm.modelName = it }
             MmprojSelector(vm, enabled)
@@ -655,6 +679,23 @@ private fun EmbeddingGroup(vm: MainViewModel, enabled: Boolean) {
         if (vm.models.isEmpty()) {
             Text("此位置还没有模型，先在「模型」组上传 GGUF。", fontSize = 12.5.sp, lineHeight = 18.sp, color = tones.muted)
         } else {
+            // 类型自动识别：默认只列向量模型（读 GGUF 元数据预判）。「显示全部」展开其余（标「语言模型」，选了当嵌入用会启动失败）。
+            val embeddingModels = vm.models.filter { vm.kindOf(it) == GgufProbe.Kind.EMBEDDING }
+            val otherModels = vm.models.filter { vm.kindOf(it) != GgufProbe.Kind.EMBEDDING }
+            val identified = embeddingModels.size + otherModels.count { vm.kindOf(it) == GgufProbe.Kind.LLM }
+            if (identified > 0) {
+                Text(
+                    "已自动识别模型类型（读 GGUF 元数据）：向量模型 ${embeddingModels.size} 个" +
+                        (if (otherModels.any { vm.kindOf(it) == GgufProbe.Kind.LLM }) "，语言模型 ${otherModels.count { vm.kindOf(it) == GgufProbe.Kind.LLM }} 个（默认隐藏，防误选）" else "") + "。",
+                    fontSize = 12.sp, lineHeight = 17.sp, color = tones.faint
+                )
+            }
+            if (embeddingModels.isEmpty() && !vm.showAllInEmbeddingList) {
+                Text(
+                    "此目录暂未发现向量模型。若你确认某个模型是向量模型，点「显示全部」手动选择。",
+                    fontSize = 12.sp, lineHeight = 17.sp, color = tones.faint
+                )
+            }
             SelectRow(
                 title = "不启用",
                 meta = null,
@@ -662,7 +703,7 @@ private fun EmbeddingGroup(vm: MainViewModel, enabled: Boolean) {
                 enabled = enabled,
                 onSelect = { vm.selectEmbedding(null) }
             )
-            vm.models.forEach { model ->
+            embeddingModels.forEach { model ->
                 SelectRow(
                     title = model.name,
                     meta = formatBytes(model.sizeBytes),
@@ -670,6 +711,50 @@ private fun EmbeddingGroup(vm: MainViewModel, enabled: Boolean) {
                     enabled = enabled,
                     onSelect = { vm.selectEmbedding(model) },
                     trailing = { DeleteIcon(enabled) { vm.requestDelete(model) } }
+                )
+            }
+            if (vm.showAllInEmbeddingList) {
+                otherModels.forEach { model ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("语言模型", fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                                    color = tones.warn,
+                                    modifier = Modifier
+                                        .background(tones.warn.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                                        .border(1.dp, tones.warn.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+                                        .padding(horizontal = 7.dp, vertical = 1.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(model.name, fontSize = 13.sp, color = tones.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Text(formatBytes(model.sizeBytes), fontSize = 11.sp, color = tones.muted)
+                        }
+                        DeleteIcon(enabled) { vm.requestDelete(model) }
+                        Box(Modifier.width(8.dp))
+                        SelectRow(
+                            title = "",
+                            meta = null,
+                            selected = vm.selectedEmbedding?.file == model.file,
+                            enabled = enabled,
+                            onSelect = { vm.selectEmbedding(model) }
+                        )
+                    }
+                }
+            } else if (otherModels.isNotEmpty()) {
+                Text(
+                    "显示全部 ${otherModels.size} 个非向量模型",
+                    fontSize = 11.5.sp, color = tones.accent,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable { vm.showAllInEmbeddingList = true }
+                )
+            }
+            if (vm.showAllInEmbeddingList) {
+                Text(
+                    "收起非向量模型",
+                    fontSize = 11.5.sp, color = tones.accent,
+                    modifier = Modifier.padding(top = 2.dp).clickable { vm.showAllInEmbeddingList = false }
                 )
             }
         }
